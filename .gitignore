@@ -1,0 +1,25 @@
+# ---- Runtime data (user-specific, generated at runtime) ----
+flows/
+jobs/
+
+# ---- Environment & secrets ---------------------------------
+.env
+
+# ---- Python cache ------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- Event log analyzer sample data ------------------------
+eventlog-analyzer/studies/
+
+# ---- OS / editor junk --------------------------------------
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# ---- Design inspiration (not source code) ------------------
+jobsTrackingPageInspiration.png

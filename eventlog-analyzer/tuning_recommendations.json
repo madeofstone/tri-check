@@ -1,0 +1,540 @@
+{
+  "version": "1.0.0",
+  "description": "Tuning recommendations knowledge base mapping Spark event log metrics to actionable tuning levers. Designed for UI consumption to provide optimization guidance.",
+  "categories": [
+    {
+      "id": "shuffle",
+      "name": "Shuffle Performance",
+      "icon": "🔀",
+      "description": "Shuffle operations move data between executors for operations like joins, aggregations, and repartitioning. Excessive shuffle is one of the most common performance bottlenecks.",
+      "metrics": [
+        {
+          "metric_key": "stages[].shuffle.read_bytes",
+          "name": "Shuffle Read Bytes",
+          "description": "Total bytes read from shuffle operations in this stage, combining both remote and local reads.",
+          "what_it_tells_you": "The volume of data being moved between executors. High shuffle volume relative to input data suggests the query plan is moving more data than necessary.",
+          "tuning_action": "If shuffle bytes significantly exceed input bytes, consider increasing spark.sql.shuffle.partitions to distribute the shuffle load across more partitions. Enable AQE (spark.sql.adaptive.enabled=true) to auto-tune partition counts.",
+          "related_settings": [
+            "spark.sql.shuffle.partitions",
+            "spark.sql.adaptive.enabled",
+            "spark.sql.adaptive.coalescePartitions.enabled",
+            "spark.sql.adaptive.advisoryPartitionSizeInBytes"
+          ],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "shuffle_read_bytes > 0",
+              "message": "Shuffle activity detected in this stage."
+            },
+            {
+              "level": "warning",
+              "condition": "shuffle_read_bytes > input_bytes * 2",
+              "message": "Shuffle volume is more than 2x the input data — consider tuning partition count."
+            },
+            {
+              "level": "critical",
+              "condition": "shuffle_read_bytes > input_bytes * 5",
+              "message": "Shuffle volume is over 5x input — significant data amplification. Review partition strategy."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].shuffle.fetch_wait_ms",
+          "name": "Shuffle Fetch Wait Time",
+          "description": "Total time tasks spent waiting to fetch shuffle data from remote executors.",
+          "what_it_tells_you": "High fetch wait indicates network congestion or executors being too busy to serve shuffle blocks. This is wasted time where your tasks are blocked.",
+          "tuning_action": "Increase spark.reducer.maxSizeInFlight (default 48m) to fetch larger shuffle blocks per request, reducing round-trips. If running on small nodes, consider larger instance types for better network bandwidth.",
+          "related_settings": [
+            "spark.reducer.maxSizeInFlight",
+            "spark.shuffle.io.maxRetries",
+            "spark.shuffle.io.retryWait"
+          ],
+          "severity_rules": [
+            {
+              "level": "warning",
+              "condition": "fetch_wait_ms > stage_duration_ms * 0.1",
+              "message": "Tasks are spending >10% of stage time waiting for shuffle data."
+            },
+            {
+              "level": "critical",
+              "condition": "fetch_wait_ms > stage_duration_ms * 0.3",
+              "message": "Tasks are spending >30% of stage time waiting for shuffle data — network bottleneck."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].shuffle.remote_bytes vs stages[].shuffle.local_bytes",
+          "name": "Shuffle Locality Ratio",
+          "description": "Proportion of shuffle data read locally vs fetched from remote executors.",
+          "what_it_tells_you": "When most shuffle reads are remote, data is crossing the network. Local reads are faster as they come from the same node.",
+          "tuning_action": "Consider spark.locality.wait settings to allow Spark more time to schedule tasks on nodes with local data. On Databricks, using fewer but larger nodes can keep more shuffle data local.",
+          "related_settings": [
+            "spark.locality.wait",
+            "spark.locality.wait.node"
+          ],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "remote_bytes > local_bytes * 3",
+              "message": "Most shuffle reads are remote — data is frequently crossing the network."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "memory_spill",
+      "name": "Memory & Spill",
+      "icon": "💾",
+      "description": "When Spark doesn't have enough memory for an operation, it spills data to disk. Spilling dramatically slows execution because disk I/O is orders of magnitude slower than memory access.",
+      "metrics": [
+        {
+          "metric_key": "stages[].task_summary.memory_bytes_spilled",
+          "name": "Memory Bytes Spilled",
+          "description": "Total bytes of data that Spark spilled from memory (before writing to disk).",
+          "what_it_tells_you": "Non-zero spill means executors ran out of execution memory for this stage. The data had to be serialized and written to disk, then read back later.",
+          "tuning_action": "Increase spark.executor.memory or spark.memory.fraction (default 0.6) to give more memory to execution. You can also increase spark.executor.memoryOverhead for off-heap-heavy workloads. Alternatively, increase spark.sql.shuffle.partitions to reduce the data volume each task handles.",
+          "related_settings": [
+            "spark.executor.memory",
+            "spark.executor.memoryOverhead",
+            "spark.memory.fraction",
+            "spark.memory.storageFraction",
+            "spark.sql.shuffle.partitions"
+          ],
+          "severity_rules": [
+            {
+              "level": "warning",
+              "condition": "memory_bytes_spilled.total > 0",
+              "message": "Memory spill detected — tasks are running out of execution memory."
+            },
+            {
+              "level": "critical",
+              "condition": "memory_bytes_spilled.total > input_bytes",
+              "message": "Spill volume exceeds input data size — significant memory pressure."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].task_summary.disk_bytes_spilled",
+          "name": "Disk Bytes Spilled",
+          "description": "Total bytes written to disk due to memory pressure.",
+          "what_it_tells_you": "This is the most expensive form of spill — data written to local disk. Large disk spill means significant runtime impact.",
+          "tuning_action": "Same remediation as memory spill: increase executor memory, memory fraction, or partition count. If using Databricks, consider nodes with SSD storage for faster spill I/O.",
+          "related_settings": [
+            "spark.executor.memory",
+            "spark.memory.fraction",
+            "spark.sql.shuffle.partitions"
+          ],
+          "severity_rules": [
+            {
+              "level": "critical",
+              "condition": "disk_bytes_spilled.total > 0",
+              "message": "Disk spill detected — data is being written to and read from disk, causing major slowdowns."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].task_summary.peak_execution_memory",
+          "name": "Peak Execution Memory",
+          "description": "Maximum memory used by a task during execution for operations like joins, sorts, and aggregations.",
+          "what_it_tells_you": "Shows how close tasks are to their memory limit. If peak memory approaches the executor's available execution memory, spill is likely.",
+          "tuning_action": "Compare peak memory against allocated executor memory × spark.memory.fraction. If usage is above 80%, proactively increase memory before spill occurs.",
+          "related_settings": [
+            "spark.executor.memory",
+            "spark.memory.fraction"
+          ],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "peak_execution_memory.max > executor_memory * 0.6",
+              "message": "Peak memory usage is above 60% of available execution memory."
+            },
+            {
+              "level": "warning",
+              "condition": "peak_execution_memory.max > executor_memory * 0.8",
+              "message": "Peak memory usage approaching limit — spill risk."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gc",
+      "name": "Garbage Collection",
+      "icon": "🗑️",
+      "description": "JVM garbage collection pauses stop task execution while the JVM reclaims unused memory. Excessive GC is a sign that executors are under memory pressure.",
+      "metrics": [
+        {
+          "metric_key": "stages[].task_summary.gc_time_ms",
+          "name": "JVM GC Time",
+          "description": "Total milliseconds spent in JVM garbage collection across all tasks in the stage.",
+          "what_it_tells_you": "Time completely wasted on GC instead of doing useful work. GC time as a percentage of run time is the key health indicator.",
+          "tuning_action": "If GC > 10% of runtime: increase spark.executor.memory to reduce heap pressure. If GC > 20%: consider switching to a larger node type, or tuning JVM GC settings via spark.executor.extraJavaOptions (e.g., switch to G1GC with -XX:+UseG1GC).",
+          "related_settings": [
+            "spark.executor.memory",
+            "spark.executor.memoryOverhead",
+            "spark.executor.extraJavaOptions"
+          ],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "gc_pct_of_runtime < 5",
+              "message": "GC overhead is healthy (under 5%)."
+            },
+            {
+              "level": "warning",
+              "condition": "gc_pct_of_runtime >= 5 AND gc_pct_of_runtime < 15",
+              "message": "GC overhead is elevated (5-15%) — consider increasing executor memory."
+            },
+            {
+              "level": "critical",
+              "condition": "gc_pct_of_runtime >= 15",
+              "message": "GC overhead is severe (>15%) — executors are under significant memory pressure. Increase memory or node size."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "task_parallelism",
+      "name": "Task Duration & Parallelism",
+      "icon": "⚡",
+      "description": "Task duration distribution and parallelism metrics help identify data skew, under/over-partitioning, and whether the cluster is being fully utilized.",
+      "metrics": [
+        {
+          "metric_key": "stages[].task_summary.run_time_ms",
+          "name": "Task Run Time Distribution",
+          "description": "Wall-clock time each task spent executing, summarized as min/max/median/p95.",
+          "what_it_tells_you": "A large gap between median and max (or p95) indicates data skew — some partitions have much more data than others, causing stragglers.",
+          "tuning_action": "If max is 3x+ the median: enable AQE skew join handling (spark.sql.adaptive.skewJoin.enabled=true). Also increase spark.sql.shuffle.partitions to create smaller, more uniform partitions.",
+          "related_settings": [
+            "spark.sql.shuffle.partitions",
+            "spark.sql.adaptive.skewJoin.enabled",
+            "spark.sql.adaptive.skewJoin.skewedPartitionFactor",
+            "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes",
+            "spark.default.parallelism"
+          ],
+          "severity_rules": [
+            {
+              "level": "warning",
+              "condition": "run_time_ms.max > run_time_ms.median * 3",
+              "message": "Task duration skew detected — slowest task is 3x+ the median. Likely data skew."
+            },
+            {
+              "level": "critical",
+              "condition": "run_time_ms.max > run_time_ms.median * 10",
+              "message": "Severe task skew — slowest task is 10x+ the median. Data is highly unbalanced."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].task_summary.cpu_utilization_pct",
+          "name": "CPU Utilization",
+          "description": "Ratio of actual CPU time to wall-clock run time, expressed as a percentage.",
+          "what_it_tells_you": "Low CPU utilization means tasks are spending time waiting (I/O, network, GC) instead of computing. High utilization means tasks are compute-bound.",
+          "tuning_action": "Low utilization (<50%): check I/O and shuffle wait times — the bottleneck is likely data access, not compute. Consider enabling disk cache (spark.databricks.io.cache.enabled). High utilization (>90%): tasks are CPU-bound, adding more cores or executors will help.",
+          "related_settings": [
+            "spark.executor.cores",
+            "spark.databricks.io.cache.enabled"
+          ],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "cpu_utilization_pct < 50",
+              "message": "Tasks are spending less than half their time on CPU — likely I/O or network bound."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].scheduling_delay_ms",
+          "name": "Scheduling Delay",
+          "description": "Time between stage submission and when the first task actually starts executing.",
+          "what_it_tells_you": "High scheduling delay means tasks are queuing because there aren't enough available executor slots. This points to an under-provisioned cluster.",
+          "tuning_action": "Increase min_workers on the cluster to ensure executors are available when stages start. If using autoscaling, the delay may be from waiting for new nodes to spin up.",
+          "related_settings": [],
+          "severity_rules": [
+            {
+              "level": "warning",
+              "condition": "scheduling_delay_ms > 10000",
+              "message": "Tasks waited >10 seconds before starting — cluster may be under-provisioned."
+            },
+            {
+              "level": "critical",
+              "condition": "scheduling_delay_ms > 60000",
+              "message": "Tasks waited >60 seconds — significant queuing delay. Increase min_workers."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].num_tasks",
+          "name": "Tasks Per Stage",
+          "description": "Number of tasks (partitions) in each stage.",
+          "what_it_tells_you": "Too few tasks means under-parallelization — not all executor cores are being used. Too many tiny tasks means overhead from scheduling dominates.",
+          "tuning_action": "Ideal: 2-4 tasks per available core. If task count is much lower than total cores, increase spark.sql.shuffle.partitions. If tasks complete in under 100ms, reduce partition count.",
+          "related_settings": [
+            "spark.sql.shuffle.partitions",
+            "spark.default.parallelism",
+            "spark.sql.files.maxPartitionBytes"
+          ],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "num_tasks < total_cores",
+              "message": "Fewer tasks than available cores — cluster is under-utilized in this stage."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "executor_scaling",
+      "name": "Executor Scaling",
+      "icon": "📊",
+      "description": "Executor scaling events show how the cluster autoscaler adds and removes workers. Optimizing min/max executors and pool size directly affects cost and performance.",
+      "metrics": [
+        {
+          "metric_key": "executor_timeline",
+          "name": "Executor Add/Remove Timeline",
+          "description": "Timestamped events showing when executors were added or removed, with core counts and memory allocations.",
+          "what_it_tells_you": "Frequent add/remove churn indicates the autoscaler is fighting: scaling up for demand, then scaling down during brief pauses. Executor additions that happen after stage start indicate tasks were queuing.",
+          "tuning_action": "If executors are added late (after stages start queuing tasks): raise min_workers. If many executors sit idle before removal: lower max_workers to save cost. If executor churn is high: adjust autoscale thresholds.",
+          "related_settings": [],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "executors_removed_reason == 'worker lost'",
+              "message": "Executors were force-removed (worker lost) — may indicate spot instance preemption or node failures."
+            }
+          ]
+        },
+        {
+          "metric_key": "summary.peak_executors",
+          "name": "Peak Executor Count",
+          "description": "Maximum number of executors active simultaneously during the job.",
+          "what_it_tells_you": "Shows whether autoscaling reached the maximum capacity. If peak equals max_workers AND tasks were queuing, you need more headroom.",
+          "tuning_action": "If peak == max_workers with scheduling delays: increase max_workers. If peak is much lower than max_workers: the cluster is properly sized or over-provisioned.",
+          "related_settings": [],
+          "severity_rules": []
+        }
+      ]
+    },
+    {
+      "id": "io_storage",
+      "name": "I/O & Cloud Storage",
+      "icon": "☁️",
+      "description": "Cloud storage metrics reveal how efficiently Spark reads from and writes to S3, ADLS, or GCS. Storage API throttling and excessive small-file reads are common bottlenecks.",
+      "metrics": [
+        {
+          "metric_key": "stages[].cloud_storage.request_count",
+          "name": "Cloud Storage Request Count",
+          "description": "Number of API calls made to cloud storage (S3/ADLS) during this stage.",
+          "what_it_tells_you": "A high number of requests with small payload sizes indicates many small files — the 'small files problem'. Each API call has latency overhead.",
+          "tuning_action": "If many requests with small sizes: consider compacting input data into larger Parquet files. Adjust spark.sql.files.maxPartitionBytes to read more data per task. Enable disk caching (spark.databricks.io.cache.enabled) to avoid repeated reads.",
+          "related_settings": [
+            "spark.sql.files.maxPartitionBytes",
+            "spark.sql.files.openCostInBytes",
+            "spark.databricks.io.cache.enabled"
+          ],
+          "severity_rules": [
+            {
+              "level": "warning",
+              "condition": "request_count > 100 AND avg_request_size < 1048576",
+              "message": "Many small cloud storage requests — possible small files problem."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].cloud_storage.retry_count",
+          "name": "Cloud Storage Retries",
+          "description": "Number of times cloud storage API requests had to be retried.",
+          "what_it_tells_you": "Retries indicate throttling (API rate limits) or transient network errors. Each retry adds latency.",
+          "tuning_action": "If retries are frequent: reduce concurrent tasks (fewer executors or cores) to lower the request rate. For S3, ensure you're using S3a committer and appropriate request pacing.",
+          "related_settings": [
+            "spark.executor.cores",
+            "spark.hadoop.fs.s3a.connection.maximum"
+          ],
+          "severity_rules": [
+            {
+              "level": "warning",
+              "condition": "retry_count > 0",
+              "message": "Cloud storage retries detected — possible API throttling."
+            },
+            {
+              "level": "critical",
+              "condition": "retry_count > 10",
+              "message": "Significant cloud storage throttling — reduce concurrent I/O or check storage tier limits."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].cloud_storage.request_duration_ms",
+          "name": "Cloud Storage Request Duration",
+          "description": "Total time in milliseconds spent on cloud storage API calls.",
+          "what_it_tells_you": "Shows how much of the stage's runtime is spent waiting on cloud storage I/O.",
+          "tuning_action": "If request duration is a large fraction of stage time: enable Databricks disk cache, or consider using a closer storage region. Larger nodes with better network bandwidth can also help.",
+          "related_settings": [
+            "spark.databricks.io.cache.enabled",
+            "spark.databricks.io.cache.maxDiskUsage"
+          ],
+          "severity_rules": [
+            {
+              "level": "warning",
+              "condition": "request_duration_ms > stage_duration_ms * 0.3",
+              "message": "Over 30% of stage time spent on cloud storage I/O."
+            }
+          ]
+        },
+        {
+          "metric_key": "stages[].io.input_bytes",
+          "name": "Input Bytes Read",
+          "description": "Total bytes of input data read by all tasks in this stage.",
+          "what_it_tells_you": "The total data scanned. Compare with output bytes to understand data amplification or reduction. Large reads with small outputs may benefit from partition pruning.",
+          "tuning_action": "If input bytes per task vary widely: tune spark.sql.files.maxPartitionBytes for more uniform partition sizes. Consider predicate pushdown or partition pruning to reduce scan volume.",
+          "related_settings": [
+            "spark.sql.files.maxPartitionBytes",
+            "spark.sql.files.openCostInBytes"
+          ],
+          "severity_rules": []
+        }
+      ]
+    },
+    {
+      "id": "data_locality",
+      "name": "Data Locality",
+      "icon": "📍",
+      "description": "Data locality indicates how close tasks run to their input data. Processing data locally avoids network transfer, which is critical for performance.",
+      "metrics": [
+        {
+          "metric_key": "stages[].locality",
+          "name": "Locality Distribution",
+          "description": "Count of tasks by locality level: PROCESS_LOCAL (same JVM), NODE_LOCAL (same node), RACK_LOCAL (same rack), ANY (any node).",
+          "what_it_tells_you": "PROCESS_LOCAL is best (data is in the same JVM cache). ANY is worst — data must be fetched across the network. In cloud environments, most tasks will be PROCESS_LOCAL or ANY since there's no rack topology.",
+          "tuning_action": "If many tasks are ANY: increase spark.locality.wait (default 3s) to give the scheduler more time to find a local slot. But don't set it too high or tasks will queue unnecessarily.",
+          "related_settings": [
+            "spark.locality.wait",
+            "spark.locality.wait.node",
+            "spark.locality.wait.process",
+            "spark.locality.wait.rack"
+          ],
+          "severity_rules": [
+            {
+              "level": "info",
+              "condition": "ANY_count > PROCESS_LOCAL_count",
+              "message": "More tasks running without data locality than with — data is being fetched across the network."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "settings_reference": {
+    "spark.sql.shuffle.partitions": {
+      "default": "200",
+      "description": "Number of partitions for shuffle operations (joins, aggregations, etc.). Controls parallelism during shuffle stages.",
+      "impact": "Too low → large partitions, memory pressure, skew. Too high → many small tasks with scheduling overhead.",
+      "recommended_range": "2x-4x the total number of cores in the cluster"
+    },
+    "spark.sql.adaptive.enabled": {
+      "default": "true (Databricks)",
+      "description": "Enables Adaptive Query Execution, which adjusts query plans at runtime based on actual data statistics.",
+      "impact": "Automatically coalesces small partitions, optimizes skew joins, and switches join strategies. Almost always beneficial.",
+      "recommended_range": "true (keep enabled)"
+    },
+    "spark.sql.adaptive.advisoryPartitionSizeInBytes": {
+      "default": "64MB",
+      "description": "Target partition size when AQE coalesces small partitions.",
+      "impact": "Smaller values → more partitions (higher parallelism). Larger values → fewer partitions (less scheduling overhead).",
+      "recommended_range": "64MB - 256MB depending on data volume"
+    },
+    "spark.sql.adaptive.skewJoin.enabled": {
+      "default": "true (Databricks)",
+      "description": "When enabled, AQE detects skewed partitions in joins and splits them into smaller sub-partitions.",
+      "impact": "Eliminates straggler tasks caused by data skew in join operations.",
+      "recommended_range": "true"
+    },
+    "spark.executor.memory": {
+      "default": "Varies by node type",
+      "description": "Amount of heap memory per executor JVM.",
+      "impact": "More memory → fewer spills, less GC. But too much → long GC pauses, wasted resources.",
+      "recommended_range": "Depends on workload; monitor spill and GC metrics to tune"
+    },
+    "spark.executor.memoryOverhead": {
+      "default": "max(384MB, 0.1 × executor.memory)",
+      "description": "Additional memory beyond the JVM heap for off-heap allocations, interned strings, and other overheads.",
+      "impact": "If tasks use significant off-heap memory (e.g., Photon, PySpark), increasing this prevents container kills.",
+      "recommended_range": "10-20% of executor.memory, increase if seeing OOM kills"
+    },
+    "spark.memory.fraction": {
+      "default": "0.6",
+      "description": "Fraction of JVM heap used for execution and storage (cache). The remaining 0.4 is reserved for user data structures and internal metadata.",
+      "impact": "Higher fraction → more memory for execution/caching, less for user objects. Lower fraction → more headroom for complex UDFs or high object creation rates.",
+      "recommended_range": "0.6 - 0.8"
+    },
+    "spark.memory.storageFraction": {
+      "default": "0.5",
+      "description": "Fraction of the execution+storage pool reserved for caching. Execution can borrow from storage if storage isn't fully used.",
+      "impact": "Lower value gives execution priority over caching. Only tune if you see heavy caching competing with execution memory.",
+      "recommended_range": "0.3 - 0.5"
+    },
+    "spark.reducer.maxSizeInFlight": {
+      "default": "48m",
+      "description": "Maximum size of map outputs to fetch per reduce task simultaneously.",
+      "impact": "Larger values reduce the number of network round-trips during shuffle, but use more memory per task.",
+      "recommended_range": "48m - 96m"
+    },
+    "spark.default.parallelism": {
+      "default": "Total cores in cluster",
+      "description": "Default number of partitions for RDD operations (not SQL). Used by operations like parallelize, reduceByKey.",
+      "impact": "For SQL workloads, spark.sql.shuffle.partitions is more relevant. This affects RDD-based operations.",
+      "recommended_range": "2x-3x total cores"
+    },
+    "spark.sql.files.maxPartitionBytes": {
+      "default": "128MB",
+      "description": "Maximum size of a partition when reading files. Controls how many tasks are created for file scans.",
+      "impact": "Smaller values → more tasks (higher parallelism for scans). Larger values → fewer tasks (less overhead for many small files).",
+      "recommended_range": "128MB - 512MB"
+    },
+    "spark.sql.files.openCostInBytes": {
+      "default": "4MB",
+      "description": "Estimated cost to open a file, measured in bytes. Used to decide whether to combine multiple small files into one partition.",
+      "impact": "Higher value → more aggressive combining of small files into partitions. Lower value → preserves more partitions.",
+      "recommended_range": "4MB - 16MB (increase for many small files)"
+    },
+    "spark.executor.cores": {
+      "default": "Varies by node type",
+      "description": "Number of concurrent tasks each executor can run.",
+      "impact": "More cores per executor → more parallelism but more memory contention. Fewer cores → less contention but needs more executors.",
+      "recommended_range": "2-5 cores per executor is typical"
+    },
+    "spark.locality.wait": {
+      "default": "3s",
+      "description": "How long the scheduler waits before giving up on scheduling a task on a node with local data.",
+      "impact": "Longer wait → better data locality but potential scheduling delays. Shorter wait → faster scheduling but more remote data fetches.",
+      "recommended_range": "3s - 10s"
+    },
+    "spark.speculation": {
+      "default": "false",
+      "description": "If enabled, Spark launches backup copies of slow-running tasks on other nodes.",
+      "impact": "Can help with straggler tasks but uses extra cluster resources. Most effective when task duration variance is high.",
+      "recommended_range": "Enable if max task time is consistently 3x+ median"
+    },
+    "spark.databricks.io.cache.enabled": {
+      "default": "true (on cache-enabled instances)",
+      "description": "Enables Databricks disk caching of remote data on local SSDs.",
+      "impact": "Dramatically speeds up repeated reads of the same data. Requires SSD-equipped node types (e.g., i3, r5d).",
+      "recommended_range": "true (on appropriate node types)"
+    },
+    "spark.databricks.delta.optimizeWrite.enabled": {
+      "default": "false",
+      "description": "Automatically optimizes the size of files written by each task to produce fewer, larger output files.",
+      "impact": "Reduces the small files problem for downstream reads but adds write-time overhead.",
+      "recommended_range": "true for frequent writes to Delta tables"
+    },
+    "spark.databricks.delta.autoCompact.enabled": {
+      "default": "false",
+      "description": "Automatically compacts small files in a Delta table after writes.",
+      "impact": "Improves read performance of downstream queries by reducing file count, at the cost of additional write operations.",
+      "recommended_range": "true for tables with many small-file writes"
+    }
+  }
+}
