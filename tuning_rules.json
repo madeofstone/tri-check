@@ -1,0 +1,119 @@
+[
+  {
+    "key": "spark.sql.files.maxPartitionBytes",
+    "section": "node",
+    "description": "Maximum bytes packed into a single input partition when reading files (Parquet, ORC, etc.). Larger values reduce task count but increase per-task memory. Should scale with available per-core memory.",
+    "default": "134217728",
+    "defaultLabel": "128 MB",
+    "formula": "(per_core_gb / 4) × 1 GB — target ~25% of per-core memory",
+    "compute": "Math.round((per_core_gb / 4) * 1024 * 1024 * 1024)"
+  },
+  {
+    "key": "spark.sql.adaptive.advisoryPartitionSizeInBytes",
+    "section": "node",
+    "description": "AQE target size for post-shuffle partition coalescing and splitting. Should match maxPartitionBytes so input and shuffle partitions are similar sizes.",
+    "default": "67108864",
+    "defaultLabel": "64 MB",
+    "formula": "Same as spark.sql.files.maxPartitionBytes",
+    "compute": "Math.round((per_core_gb / 4) * 1024 * 1024 * 1024)"
+  },
+  {
+    "key": "spark.sql.autoBroadcastJoinThreshold",
+    "section": "node",
+    "description": "Maximum size of a table that can be broadcast to all executors for a join. Larger values avoid expensive shuffle joins but consume more memory. Capped at 100 MB.",
+    "default": "10485760",
+    "defaultLabel": "10 MB",
+    "formula": "min(10% of unified memory, 100 MB)",
+    "compute": "Math.min(Math.round(0.1 * unified_gb * 1024 * 1024 * 1024), 104857600)"
+  },
+  {
+    "key": "spark.sql.adaptive.coalescePartitions.minPartitionSize",
+    "section": "node",
+    "description": "Minimum partition size for AQE coalescing. Prevents AQE from creating too-small partitions after a shuffle. Set to 25% of advisory size.",
+    "default": "1048576",
+    "defaultLabel": "1 MB",
+    "formula": "0.25 × advisoryPartitionSizeInBytes",
+    "compute": "Math.round(0.25 * (per_core_gb / 4) * 1024 * 1024 * 1024)"
+  },
+  {
+    "key": "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes",
+    "section": "node",
+    "description": "Absolute byte threshold at which AQE flags a partition as skewed and splits it. Should be a multiple of advisory size to catch genuinely large partitions without false positives.",
+    "default": "268435456",
+    "defaultLabel": "256 MB",
+    "formula": "4 × advisoryPartitionSizeInBytes",
+    "compute": "Math.round(4 * (per_core_gb / 4) * 1024 * 1024 * 1024)"
+  },
+  {
+    "key": "spark.sql.adaptive.coalescePartitions.minPartitionNum",
+    "section": "node",
+    "description": "Minimum number of partitions after AQE coalescing. Prevents over-reduction that would waste parallelism. Set to 2× cores per executor.",
+    "default": "1",
+    "defaultLabel": "1",
+    "formula": "2 × cores per executor",
+    "compute": "String(2 * cores)"
+  },
+  {
+    "key": "spark.sql.adaptive.enabled",
+    "section": "cluster",
+    "description": "Master switch for Adaptive Query Execution. AQE dynamically optimizes query plans at runtime based on actual data statistics — coalescing partitions, splitting skewed data, and converting joins.",
+    "default": "false",
+    "defaultLabel": "false (true on Databricks)",
+    "formula": "Always true for batch SQL/DataFrame workloads",
+    "compute": "'true'"
+  },
+  {
+    "key": "spark.sql.adaptive.skewJoin.enabled",
+    "section": "cluster",
+    "description": "Enable AQE automatic skew join handling. When enabled, AQE detects skewed partitions and splits them to balance work across tasks, preventing individual tasks from becoming bottlenecks.",
+    "default": "true",
+    "defaultLabel": "true",
+    "formula": "Always true when AQE is enabled",
+    "compute": "'true'"
+  },
+  {
+    "key": "spark.sql.adaptive.coalescePartitions.enabled",
+    "section": "cluster",
+    "description": "Enable AQE automatic partition coalescing. Merges small post-shuffle partitions to reduce task overhead and improve efficiency when actual data is smaller than the configured partition count suggests.",
+    "default": "true",
+    "defaultLabel": "true",
+    "formula": "Always true when AQE is enabled",
+    "compute": "'true'"
+  },
+  {
+    "key": "spark.sql.shuffle.partitions",
+    "section": "cluster",
+    "description": "Default number of partitions for shuffle operations (joins, aggregations). With AQE enabled, use 'auto' on Databricks or a high value — AQE will coalesce down as needed.",
+    "default": "200",
+    "defaultLabel": "200",
+    "formula": "'auto' on Databricks (AQE tunes dynamically)",
+    "compute": "'auto'"
+  },
+  {
+    "key": "spark.dynamicAllocation.schedulerBacklogTimeout",
+    "section": "cluster",
+    "description": "How long pending tasks must wait in the scheduler queue before requesting new executors. Higher values reduce aggressive scale-up for short-lived task bursts.",
+    "default": "1s",
+    "defaultLabel": "1s",
+    "formula": "5–15s to smooth scaling",
+    "compute": "'10s'"
+  },
+  {
+    "key": "spark.dynamicAllocation.sustainedSchedulerBacklogTimeout",
+    "section": "cluster",
+    "description": "After initial scale-up, how long a sustained backlog must persist before requesting even more executors. Should be ≥ schedulerBacklogTimeout to avoid thrashing.",
+    "default": "1s",
+    "defaultLabel": "= schedulerBacklogTimeout",
+    "formula": "10–30s (≥ schedulerBacklogTimeout)",
+    "compute": "'20s'"
+  },
+  {
+    "key": "spark.dynamicAllocation.executorIdleTimeout",
+    "section": "cluster",
+    "description": "How long an executor sits idle before being released. Longer values keep executors warm between stages/jobs, reducing cold-start cost at the expense of some extra idle capacity.",
+    "default": "60s",
+    "defaultLabel": "60s",
+    "formula": "120–300s for less aggressive scale-down",
+    "compute": "'180s'"
+  }
+]
