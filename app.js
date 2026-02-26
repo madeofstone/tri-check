@@ -56,6 +56,9 @@ settingsModal.addEventListener("click", (e) => {
 // Load saved flows on startup
 loadSavedFlows();
 
+// Initialize All Jobs tab
+ajInit();
+
 // ---- Load Saved Flows on Startup --------------------------
 async function loadSavedFlows() {
     try {

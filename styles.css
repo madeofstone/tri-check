@@ -76,11 +76,41 @@ body {
 .icon-btn-sm { width: 28px; height: 28px; }
 .icon-btn-sm svg { width: 16px; height: 16px; }
 
+/* --- Tab Bar ----------------------------------------------- */
+.tab-bar {
+    position: fixed; top: var(--topbar-h); left: 0; right: 0;
+    z-index: 99;
+    display: flex; gap: 0;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0 24px;
+    height: 40px;
+}
+.tab-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 0 18px; height: 100%;
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--text-muted); font-size: 0.82rem; font-weight: 600;
+    cursor: pointer; transition: var(--transition);
+    white-space: nowrap;
+}
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+.tab-btn svg { opacity: 0.7; }
+.tab-btn.active svg { opacity: 1; }
+
+/* --- Tab Panels -------------------------------------------- */
+.tab-panel { display: flex; width: 100%; }
+.tab-panel:not(.active) { display: none; }
+
 /* --- App Layout -------------------------------------------- */
 .app-layout {
     display: flex;
-    margin-top: var(--topbar-h);
-    height: calc(100vh - var(--topbar-h));
+    margin-top: calc(var(--topbar-h) + 40px);
+    height: calc(100vh - var(--topbar-h) - 40px);
 }
 
 /* --- Sidebar ----------------------------------------------- */
@@ -572,3 +602,105 @@ body {
 .settings-section-disabled .settings-section-title {
     opacity: 0.6;
 }
+
+/* ============================================================
+   All Jobs Tab Styles
+   ============================================================ */
+
+/* --- KPI Strip --------------------------------------------- */
+.aj-kpi-strip {
+    display: flex; gap: 14px;
+    margin-bottom: 20px;
+}
+.aj-kpi {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 12px 18px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    min-width: 120px;
+}
+.aj-kpi-value {
+    font-size: 1.5rem; font-weight: 700; color: var(--accent);
+    line-height: 1.2;
+}
+.aj-kpi-label {
+    font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-muted);
+}
+
+/* --- Toolbar ----------------------------------------------- */
+.aj-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 16px; gap: 12px;
+    flex-wrap: wrap;
+}
+.aj-toolbar-left {
+    display: flex; align-items: center; gap: 10px;
+}
+.aj-toolbar-right {
+    display: flex; align-items: center; gap: 12px;
+}
+.aj-search-wrap { position: relative; }
+.aj-search {
+    width: 220px; padding: 7px 12px;
+    border: 1px solid var(--border-medium); border-radius: var(--radius-sm);
+    background: var(--bg-card); color: var(--text-primary);
+    font-size: 0.82rem;
+}
+.aj-search:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(108,122,255,0.15);
+}
+.aj-filter-select {
+    padding: 7px 10px; border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm); background: var(--bg-card);
+    color: var(--text-primary); font-size: 0.82rem;
+    cursor: pointer;
+}
+.aj-group-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.82rem; color: var(--text-secondary);
+    cursor: pointer; white-space: nowrap;
+}
+.aj-group-label input { cursor: pointer; }
+
+/* --- Table Overrides --------------------------------------- */
+.aj-table-wrap {
+    margin-bottom: 20px;
+}
+.aj-table th { white-space: nowrap; }
+
+/* --- Group Rows -------------------------------------------- */
+.aj-group-header {
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.aj-group-header:hover {
+    background: var(--bg-elevated) !important;
+}
+.aj-group-toggle {
+    width: 24px; text-align: center;
+    font-size: 0.9rem; color: var(--text-muted);
+}
+.aj-group-child {
+    background: rgba(108,122,255,0.03);
+}
+.aj-group-child td { padding-left: 12px; }
+
+/* --- Load More --------------------------------------------- */
+.aj-load-more {
+    display: flex; align-items: center; gap: 12px;
+    justify-content: center;
+    padding: 16px 0;
+}
+.aj-load-more-count {
+    font-size: 0.78rem; color: var(--text-muted);
+}
+
+/* --- DBX column in All Jobs -------------------------------- */
+.dbx-col-header { width: 60px; text-align: center; }
+.dbx-cell { text-align: center; }
+.cell-empty { color: var(--text-muted); }
+
