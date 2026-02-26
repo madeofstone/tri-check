@@ -16,7 +16,7 @@ class PlatformAPIError(Exception):
 class PlatformAPI:
     """Client for interacting with the Alteryx Cloud Platform Job Library API."""
     
-    def __init__(self, token: Optional[str] = None, base_url: Optional[str] = None, verify_ssl: bool = True):
+    def __init__(self, token: Optional[str] = None, base_url: Optional[str] = None, verify_ssl: bool = True, timeout: int = 10):
         """
         Initialize the Platform API client.
         
@@ -24,9 +24,11 @@ class PlatformAPI:
             token: API bearer token (uses Config if not provided)
             base_url: API base URL (uses Config if not provided)
             verify_ssl: Whether to verify SSL certificates (disable for on-prem with self-signed certs)
+            timeout: Request timeout in seconds (default 10)
         """
         self.token = token or Config.PLATFORM_API_TOKEN
         self.base_url = base_url or Config.PLATFORM_API_BASE_URL
+        self.timeout = timeout
         self.session = requests.Session()
         self.session.verify = verify_ssl
         self.session.headers.update({
@@ -63,9 +65,13 @@ class PlatformAPI:
         url = f"{self.base_url}/jobLibrary?{urlencode(params)}"
         
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.Timeout:
+            raise PlatformAPIError(f"Trifacta unreachable — timed out after {self.timeout}s fetching jobs for '{flow_name}'")
+        except requests.exceptions.ConnectionError:
+            raise PlatformAPIError(f"Trifacta unreachable — cannot connect to {self.base_url}")
         except requests.exceptions.RequestException as e:
             raise PlatformAPIError(f"Failed to fetch jobs for flow '{flow_name}': {e}")
     

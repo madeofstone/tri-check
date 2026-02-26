@@ -360,6 +360,53 @@ def fetch_databricks_details():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/databricks/refresh", methods=["POST"])
+def refresh_databricks_details():
+    """Clear cached DBX data and event log analysis, then re-fetch from Databricks."""
+    body = request.get_json(silent=True) or {}
+    dbx_job_id = body.get("databricksJobId")
+    flow_name = body.get("flowName", "").strip()
+    job_run_id = body.get("jobRunId")
+
+    if not dbx_job_id:
+        return jsonify({"error": "databricksJobId is required"}), 400
+
+    # Clear cached data
+    if flow_name and job_run_id:
+        flow_store.clear_dbx_job(flow_name, str(job_run_id))
+
+    if not Config.DATABRICKS_HOST or not Config.DATABRICKS_TOKEN:
+        return jsonify({"error": "DATABRICKS_HOST and DATABRICKS_TOKEN must be configured"}), 400
+
+    try:
+        dbx = DatabricksClient(host=Config.DATABRICKS_HOST, token=Config.DATABRICKS_TOKEN)
+        run_details = dbx.get_run_details(dbx_job_id)
+
+        cluster_events = []
+        cluster_id = run_details.get("clusterId")
+        if cluster_id:
+            try:
+                cluster_events = dbx.get_cluster_events(cluster_id)
+            except DatabricksClientError as e:
+                run_details["clusterEventsError"] = str(e)
+
+        response_data = {
+            "databricksJobId": dbx_job_id,
+            "databricksHost": Config.DATABRICKS_HOST,
+            "runDetails": run_details,
+            "clusterEvents": cluster_events,
+            "cached": False,
+        }
+
+        # Save fresh data to cache
+        if flow_name and job_run_id:
+            flow_store.save_dbx(flow_name, str(job_run_id), response_data)
+
+        return jsonify(response_data)
+    except DatabricksClientError as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/eventlog", methods=["POST"])
 def fetch_eventlog():
     """Download a Spark event log from DBFS and run the analyzer."""

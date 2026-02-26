@@ -593,6 +593,176 @@ def extract_job_results(events):
     return sorted(jobs.values(), key=lambda x: x.get("job_id", 0))
 
 
+def extract_pending_task_timeline(events):
+    """
+    Build a timeline of pending (queued but not yet finished) tasks.
+
+    Increments on SparkListenerStageSubmitted (by Number of Tasks),
+    decrements on each successful SparkListenerTaskEnd.
+    Returns sorted list of {timestamp, pending}.
+    """
+    deltas = []  # (timestamp, delta)
+
+    for ev in events:
+        evt = ev.get("Event", "")
+
+        if evt == "SparkListenerStageSubmitted":
+            si = ev.get("Stage Info", {})
+            ts = si.get("Submission Time")
+            num_tasks = si.get("Number of Tasks", 0)
+            if ts and num_tasks:
+                deltas.append((ts, num_tasks))
+
+        elif evt == "SparkListenerTaskEnd":
+            reason = ev.get("Task End Reason", {}).get("Reason", "")
+            if reason == "Success":
+                task_info = ev.get("Task Info", {})
+                finish_time = task_info.get("Finish Time")
+                if finish_time:
+                    deltas.append((finish_time, -1))
+
+    # Sort by timestamp, then by delta (additions before subtractions at same ts)
+    deltas.sort(key=lambda x: (x[0], -x[1]))
+
+    pending = 0
+    timeline = []
+    for ts, delta in deltas:
+        pending = max(0, pending + delta)
+        timeline.append({"timestamp": ts, "pending": pending})
+
+    return timeline
+
+
+def extract_executor_task_distribution(events):
+    """
+    Build per-executor task metrics for the Task Distribution chart.
+
+    Groups by Executor ID and computes:
+    - tasks_processed: count of successfully completed tasks
+    - avg_active_cores: total_compute_time / executor_lifespan, rounded up
+    """
+    # executor_id -> list of (launch_time, finish_time)
+    executor_tasks = {}
+
+    for ev in events:
+        if ev.get("Event") != "SparkListenerTaskEnd":
+            continue
+        reason = ev.get("Task End Reason", {}).get("Reason", "")
+        if reason != "Success":
+            continue
+
+        task_info = ev.get("Task Info", {})
+        exec_id = task_info.get("Executor ID", "")
+        launch = task_info.get("Launch Time")
+        finish = task_info.get("Finish Time")
+        if not launch or not finish:
+            continue
+
+        if exec_id not in executor_tasks:
+            executor_tasks[exec_id] = []
+        executor_tasks[exec_id].append((launch, finish))
+
+    result = []
+    for exec_id in sorted(executor_tasks.keys(), key=lambda x: (len(x), x)):
+        tasks = executor_tasks[exec_id]
+        tasks_processed = len(tasks)
+
+        total_compute_ms = sum(f - l for l, f in tasks)
+        first_launch = min(l for l, f in tasks)
+        last_finish = max(f for l, f in tasks)
+        lifespan_ms = last_finish - first_launch
+
+        if lifespan_ms > 0:
+            avg_cores = total_compute_ms / lifespan_ms
+            avg_active_cores = math.ceil(avg_cores)
+        else:
+            avg_active_cores = 1
+
+        result.append({
+            "executor_id": exec_id,
+            "tasks_processed": tasks_processed,
+            "avg_active_cores": avg_active_cores,
+        })
+
+    return result
+
+
+def extract_stage_task_bins(events, bin_size=20):
+    """
+    Build binned task breakdown per stage for the Stage Task Breakdown chart.
+
+    For each stage, sorts successful tasks by duration, chunks into bins,
+    and computes per-bin averages for duration, GC time, and disk spill.
+
+    Returns:
+        {"longest_stage_id": int, "stages": {stage_id: [bins]}}
+    """
+    # Collect successful tasks per stage
+    stage_tasks = {}  # stage_id -> [(duration_ms, gc_ms, spill_bytes)]
+
+    for ev in events:
+        if ev.get("Event") != "SparkListenerTaskEnd":
+            continue
+        reason = ev.get("Task End Reason", {}).get("Reason", "")
+        if reason != "Success":
+            continue
+
+        stage_id = ev.get("Stage ID")
+        task_info = ev.get("Task Info", {})
+        task_metrics = ev.get("Task Metrics", {})
+
+        launch = task_info.get("Launch Time", 0)
+        finish = task_info.get("Finish Time", 0)
+        duration_ms = finish - launch if finish and launch else 0
+        gc_ms = task_metrics.get("JVM GC Time", 0)
+        spill_bytes = task_metrics.get("Disk Bytes Spilled", 0)
+
+        if stage_id is not None:
+            if stage_id not in stage_tasks:
+                stage_tasks[stage_id] = []
+            stage_tasks[stage_id].append((duration_ms, gc_ms, spill_bytes))
+
+    # Build bins per stage
+    stages_binned = {}
+    longest_stage_id = None
+    longest_duration_total = 0
+
+    for stage_id in sorted(stage_tasks.keys()):
+        tasks = stage_tasks[stage_id]
+        # Sort by duration
+        tasks.sort(key=lambda t: t[0])
+
+        total_duration = sum(t[0] for t in tasks)
+        if total_duration > longest_duration_total:
+            longest_duration_total = total_duration
+            longest_stage_id = stage_id
+
+        bins = []
+        for i in range(0, len(tasks), bin_size):
+            chunk = tasks[i : i + bin_size]
+            start_idx = i + 1
+            end_idx = i + len(chunk)
+            label = f"P{start_idx}-{end_idx}"
+
+            avg_duration = sum(t[0] for t in chunk) / len(chunk)
+            avg_gc = sum(t[1] for t in chunk) / len(chunk)
+            avg_spill = sum(t[2] for t in chunk) / len(chunk)
+
+            bins.append({
+                "label": label,
+                "avg_duration_ms": round(avg_duration, 1),
+                "avg_gc_ms": round(avg_gc, 1),
+                "avg_spill_bytes": round(avg_spill, 1),
+            })
+
+        stages_binned[str(stage_id)] = bins
+
+    return {
+        "longest_stage_id": longest_stage_id,
+        "stages": stages_binned,
+    }
+
+
 def compute_overall_summary(metadata, stages, executor_timeline, sql_queries):
     """Compute top-level summary statistics for quick overview."""
     total_tasks = sum(s["task_summary"]["total_tasks"] for s in stages)
@@ -710,20 +880,65 @@ def analyze(eventlog_path, output_path=None):
     print("   Extracting job results...")
     jobs = extract_job_results(events)
 
+    print("   Building pending task timeline...")
+    pending_timeline = extract_pending_task_timeline(events)
+
+    print("   Building executor task distribution...")
+    executor_distribution = extract_executor_task_distribution(events)
+
+    print("   Building stage task bins...")
+    stage_task_bins = extract_stage_task_bins(events)
+
     print("   Computing overall summary...")
     summary = compute_overall_summary(
         metadata, stages, executor_timeline, sql_queries
     )
 
+    # Build tuning inputs from resource profiles and config
+    print("   Computing tuning inputs...")
+    tuning_inputs = {}
+    if resource_profiles:
+        rp = resource_profiles[0]
+        exec_mem_mb = rp.get("executor_memory_mb", 0)
+        offheap_mb = rp.get("executor_offheap_mb", 0)
+        unified_mb = exec_mem_mb + offheap_mb
+        unified_gb = round(unified_mb / 1024, 2)
+
+        # Cores: prefer total_cores from executor timeline, then config, then task_cpus
+        cores = 0
+        for ev in executor_timeline:
+            if ev.get("event") == "added" and ev.get("total_cores"):
+                cores = int(ev["total_cores"])
+                break
+        if cores == 0:
+            cores = int(config.get("spark.executor.cores", 0))
+        if cores == 0:
+            cores = max(1, int(rp.get("task_cpus", 1)))
+
+        per_core_gb = round(unified_gb / cores, 2) if cores > 0 else 0
+
+        tuning_inputs = {
+            "executor_memory_mb": exec_mem_mb,
+            "executor_offheap_mb": offheap_mb,
+            "unified_memory_mb": unified_mb,
+            "unified_memory_gb": unified_gb,
+            "cores_per_executor": cores,
+            "per_core_gb": per_core_gb,
+        }
+
     analysis = {
-        "analysis_version": "1.0.0",
+        "analysis_version": "2.1.0",
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "source_file": os.path.basename(eventlog_path),
         "metadata": metadata,
         "summary": summary,
         "config_snapshot": config,
         "resource_profiles": resource_profiles,
+        "tuning_inputs": tuning_inputs,
         "executor_timeline": executor_timeline,
+        "pending_task_timeline": pending_timeline,
+        "executor_task_distribution": executor_distribution,
+        "stage_task_bins": stage_task_bins,
         "jobs": jobs,
         "stages": stages,
         "sql_queries": sql_queries,

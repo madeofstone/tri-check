@@ -132,6 +132,18 @@
     width: 100%;
     max-height: 280px;
 }
+.dash-chart-canvas-tall {
+    width: 100%;
+    max-height: 500px;
+}
+.dash-chart-subtitle {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 
 /* --- Red Flags --------------------------------------------- */
 .dash-flags-section {
@@ -182,18 +194,156 @@
     font-size: 0.85rem; font-weight: 600;
 }
 
-/* --- Recommendations Placeholder --------------------------- */
-.dash-recs-section {
-    margin-bottom: 24px;
+/* --- Two-Column Layout: Charts + Tuning Sidebar ------------ */
+.dash-main-layout {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
 }
-.dash-recs-placeholder {
-    padding: 20px;
-    border-radius: var(--radius);
+.dash-charts-col {
+    flex: 1;
+    min-width: 0;
+}
+
+/* --- Tuning Panel (right sidebar) -------------------------- */
+.dash-tuning-panel {
+    width: 300px;
+    min-width: 300px;
     background: var(--bg-card);
-    border: 1px dashed var(--border-medium);
-    color: var(--text-muted);
-    font-size: 0.85rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    padding: 18px 16px;
+    position: sticky;
+    top: 24px;
+    max-height: calc(100vh - var(--topbar-h) - 48px);
+    overflow-y: auto;
+}
+
+.tuning-panel-title {
+    font-size: 0.95rem; font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+}
+
+/* --- Tuning KPIs ------------------------------------------- */
+.tuning-kpis {
+    display: flex; flex-direction: column; gap: 8px;
+    margin-bottom: 18px;
+}
+.tuning-kpi {
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+}
+.tuning-kpi-value {
+    font-size: 1.4rem; font-weight: 700;
+    color: var(--accent);
+    line-height: 1.2;
+}
+.tuning-kpi-unit {
+    font-size: 0.7rem; font-weight: 600;
+    color: var(--text-muted); margin-left: 3px;
+}
+.tuning-kpi-label {
+    font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-muted);
+    margin-top: 4px;
+}
+.tuning-kpi-detail {
+    font-size: 0.65rem; color: var(--text-muted);
+    margin-top: 2px; opacity: 0.7;
+}
+
+/* --- Tuning Section Labels --------------------------------- */
+.tuning-section-label {
+    font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-muted);
+    margin: 14px 0 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+/* --- Tuning Settings Table --------------------------------- */
+.tuning-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.72rem;
+}
+.tuning-row {
+    cursor: help;
+    transition: background 0.15s;
+}
+.tuning-row:hover {
+    background: var(--bg-elevated);
+}
+.tuning-row td {
+    padding: 5px 4px;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: middle;
+}
+.tuning-key {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    word-break: break-all;
+    max-width: 120px;
+}
+.tuning-current {
+    color: var(--text-primary);
+    font-weight: 600;
+    white-space: nowrap;
     text-align: center;
+}
+.tuning-suggested {
+    color: var(--accent);
+    font-weight: 600;
+    white-space: nowrap;
+    text-align: center;
+}
+.tuning-status {
+    width: 20px;
+    text-align: center;
+}
+.tuning-match {
+    color: var(--green);
+    font-weight: 700;
+    font-size: 0.75rem;
+}
+.tuning-diff {
+    color: var(--amber);
+    font-weight: 700;
+    font-size: 0.75rem;
+}
+.tuning-default {
+    color: var(--text-muted);
+    font-style: italic;
+    font-weight: 400;
+}
+
+/* Diff rows — amber accent */
+.tuning-row-diff td {
+    background: rgba(251, 191, 36, 0.04);
+}
+.tuning-row-diff:hover td {
+    background: rgba(251, 191, 36, 0.08);
+}
+
+/* Formula rows — hidden by default, shown on hover */
+.tuning-formula-row {
+    display: none;
+}
+.tuning-row:hover + .tuning-formula-row {
+    display: table-row;
+}
+.tuning-formula {
+    padding: 3px 6px 6px !important;
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    font-style: italic;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-elevated);
 }
 
 /* --- View Dashboard Button (in DBX panel) ------------------- */
@@ -213,3 +363,4 @@
 }
 .dash-open-btn:active { transform: translateY(0); }
 .dash-open-btn svg { flex-shrink: 0; }
+

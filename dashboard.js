@@ -8,6 +8,12 @@
 let _dashCharts = [];
 let _dashActive = false;
 
+// Store current analysis for cross-chart interactions
+let _dashAnalysis = null;
+
+// Cached tuning rules (loaded once from tuning_rules.json)
+let _tuningRules = null;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -17,14 +23,26 @@ let _dashActive = false;
  * @param {Object} analysis — parsed analysis.json
  * @param {string} jobRunId — for display
  */
-function openDashboard(analysis, jobRunId) {
+async function openDashboard(analysis, jobRunId) {
     const slider = document.getElementById("viewSlider");
     const panel = document.getElementById("dashboardPanel");
     const main = document.getElementById("mainContent");
     if (!slider || !panel) return;
 
     _dashActive = true;
+    _dashAnalysis = analysis;
     main.classList.add("slider-active");
+
+    // Load tuning rules once
+    if (!_tuningRules) {
+        try {
+            const resp = await fetch("tuning_rules.json");
+            _tuningRules = await resp.json();
+        } catch (e) {
+            console.warn("Could not load tuning_rules.json:", e);
+            _tuningRules = [];
+        }
+    }
 
     // Build dashboard HTML
     panel.innerHTML = buildDashboardHTML(analysis, jobRunId);
@@ -36,7 +54,14 @@ function openDashboard(analysis, jobRunId) {
     requestAnimationFrame(() => {
         setTimeout(() => {
             renderExecutorTimeline(analysis);
-            renderStageBreakdown(analysis);
+            renderTaskDistribution(analysis);
+            renderStageWaterfall(analysis);
+            // Stage task bins — default to longest stage
+            const stb = analysis.stage_task_bins || {};
+            const defaultStage = stb.longest_stage_id;
+            if (defaultStage != null) {
+                renderStageTaskBins(analysis, defaultStage);
+            }
         }, 100);
     });
 }
@@ -51,6 +76,7 @@ function closeDashboard() {
 
     slider.classList.remove("slide-dashboard");
     _dashActive = false;
+    _dashAnalysis = null;
 
     // Destroy charts after transition
     setTimeout(() => {
@@ -88,28 +114,177 @@ function buildDashboardHTML(analysis, jobRunId) {
     // KPI Cards
     html += buildKPICards(summary, config);
 
-    // Charts
+    // Two-column layout: charts (left) + tuning panel (right)
+    html += `<div class="dash-main-layout">`;
+
+    // LEFT: Charts column
+    html += `<div class="dash-charts-col">`;
     html += `<div class="dash-charts-row">`;
+
+    // 1. Executor Scaling Timeline (with pending tasks)
     html += `<div class="dash-chart-card">`;
     html += `<div class="dash-chart-title">Executor Scaling Timeline</div>`;
     html += `<canvas id="executorTimelineChart" class="dash-chart-canvas"></canvas>`;
     html += `</div>`;
+
+    // 2. Task Distribution & Core Parallelism
+    html += `<div class="dash-chart-card">`;
+    html += `<div class="dash-chart-title">Task Distribution & Core Parallelism</div>`;
+    html += `<canvas id="taskDistributionChart" class="dash-chart-canvas"></canvas>`;
+    html += `</div>`;
+
+    // 3. Stage Performance Breakdown (Waterfall)
     html += `<div class="dash-chart-card">`;
     html += `<div class="dash-chart-title">Stage Performance Breakdown</div>`;
-    html += `<canvas id="stageBreakdownChart" class="dash-chart-canvas"></canvas>`;
+    html += `<canvas id="stageWaterfallChart" class="dash-chart-canvas-tall"></canvas>`;
     html += `</div>`;
+
+    // 4. Stage Task Breakdown (Binned)
+    html += `<div class="dash-chart-card">`;
+    html += `<div class="dash-chart-title">Stage Task Breakdown</div>`;
+    html += `<div id="stageTaskBinsLabel" class="dash-chart-subtitle"></div>`;
+    html += `<canvas id="stageTaskBinsChart" class="dash-chart-canvas"></canvas>`;
     html += `</div>`;
+
+    html += `</div>`; // .dash-charts-row
 
     // Red Flags
     html += buildRedFlags(analysis);
 
-    // Recommendations placeholder
-    html += `<div class="dash-recs-section">`;
-    html += `<div class="dash-flags-title">Tuning Recommendations</div>`;
-    html += `<div class="dash-recs-placeholder">Recommendations engine coming soon — will surface actionable insights based on analysis data.</div>`;
-    html += `</div>`;
+    html += `</div>`; // .dash-charts-col
+
+    // RIGHT: Tuning Panel sidebar
+    html += buildTuningPanel(analysis);
+
+    html += `</div>`; // .dash-main-layout
 
     html += `</div>`; // .dash-container
+    return html;
+}
+
+// ---------------------------------------------------------------------------
+// Tuning Panel — KPIs + settings comparison table
+// ---------------------------------------------------------------------------
+
+function _formatBytes(bytes) {
+    if (bytes == null) return "—";
+    const n = Number(bytes);
+    if (isNaN(n)) return String(bytes);
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + " GB";
+    if (n >= 1048576) return (n / 1048576).toFixed(0) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+    return n + " B";
+}
+
+function _computeSuggested(rule, ti) {
+    try {
+        const unified_gb = ti.unified_memory_gb || 0;
+        const unified_mb = ti.unified_memory_mb || 0;
+        const per_core_gb = ti.per_core_gb || 0;
+        const cores = ti.cores_per_executor || 1;
+        // eslint-disable-next-line no-eval
+        return String(eval(rule.compute));
+    } catch (e) {
+        return "—";
+    }
+}
+
+function _displayValue(raw, isBytes) {
+    if (raw == null || raw === "") return "—";
+    const s = String(raw);
+    if (isBytes) {
+        const n = Number(s);
+        if (!isNaN(n) && n > 1024) return _formatBytes(n);
+    }
+    return s;
+}
+
+function buildTuningPanel(analysis) {
+    const ti = analysis.tuning_inputs || {};
+    const config = analysis.config_snapshot || {};
+    const rules = _tuningRules || [];
+
+    let html = `<div class="dash-tuning-panel">`;
+
+    // Title
+    html += `<div class="tuning-panel-title">Suggested Tuning</div>`;
+
+    // KPI cards
+    html += `<div class="tuning-kpis">`;
+
+    // 1. Unified Memory
+    const unifiedGb = ti.unified_memory_gb != null ? ti.unified_memory_gb.toFixed(2) : "—";
+    html += `<div class="tuning-kpi">`;
+    html += `<div class="tuning-kpi-value">${unifiedGb}<span class="tuning-kpi-unit">GB</span></div>`;
+    html += `<div class="tuning-kpi-label">Unified Memory</div>`;
+    html += `<div class="tuning-kpi-detail">${ti.executor_memory_mb || 0} MB heap + ${ti.executor_offheap_mb || 0} MB off-heap</div>`;
+    html += `</div>`;
+
+    // 2. Cores per Executor
+    const cores = ti.cores_per_executor != null ? ti.cores_per_executor : "—";
+    html += `<div class="tuning-kpi">`;
+    html += `<div class="tuning-kpi-value">${cores}</div>`;
+    html += `<div class="tuning-kpi-label">Cores / Executor</div>`;
+    html += `</div>`;
+
+    // 3. Memory per Core
+    const perCore = ti.per_core_gb != null ? ti.per_core_gb.toFixed(2) : "—";
+    html += `<div class="tuning-kpi">`;
+    html += `<div class="tuning-kpi-value">${perCore}<span class="tuning-kpi-unit">GB</span></div>`;
+    html += `<div class="tuning-kpi-label">Memory / Core</div>`;
+    html += `</div>`;
+
+    html += `</div>`; // .tuning-kpis
+
+    // Settings table — split by section
+    const sections = [
+        { label: "Node-Specific Settings", key: "node" },
+        { label: "Cluster-Wide Settings", key: "cluster" },
+    ];
+
+    for (const section of sections) {
+        const sectionRules = rules.filter(r => r.section === section.key);
+        if (sectionRules.length === 0) continue;
+
+        html += `<div class="tuning-section-label">${section.label}</div>`;
+        html += `<table class="tuning-table"><tbody>`;
+
+        for (const rule of sectionRules) {
+            const currentRaw = config[rule.key];
+            const suggested = _computeSuggested(rule, ti);
+            const isBytesSetting = rule.key.includes("Bytes") || rule.key.includes("Threshold");
+
+            const currentDisplay = currentRaw != null ? _displayValue(currentRaw, isBytesSetting) : `<span class="tuning-default">${rule.defaultLabel || rule.default}</span>`;
+            const suggestedDisplay = _displayValue(suggested, isBytesSetting);
+
+            // Determine if current matches suggested
+            const currentNorm = currentRaw != null ? String(currentRaw).toLowerCase().trim() : String(rule.default).toLowerCase().trim();
+            const suggestedNorm = String(suggested).toLowerCase().trim();
+            const matches = currentNorm === suggestedNorm;
+
+            const rowClass = matches ? "" : " tuning-row-diff";
+            const matchIcon = matches ? `<span class="tuning-match">✓</span>` : `<span class="tuning-diff">✗</span>`;
+
+            // Short display name: strip spark.sql. / spark. prefix
+            const shortKey = rule.key
+                .replace(/^spark\.sql\.adaptive\./, "…adaptive.")
+                .replace(/^spark\.sql\./, "…sql.")
+                .replace(/^spark\.dynamicAllocation\./, "…dynAlloc.")
+                .replace(/^spark\./, "…");
+
+            html += `<tr class="tuning-row${rowClass}" title="${esc(rule.description)}">`;
+            html += `<td class="tuning-key">${esc(shortKey)}</td>`;
+            html += `<td class="tuning-current">${currentDisplay}</td>`;
+            html += `<td class="tuning-suggested">${suggestedDisplay}</td>`;
+            html += `<td class="tuning-status">${matchIcon}</td>`;
+            html += `</tr>`;
+            // Formula row (shown on hover via CSS)
+            html += `<tr class="tuning-formula-row"><td colspan="4" class="tuning-formula">${esc(rule.formula)}</td></tr>`;
+        }
+        html += `</tbody></table>`;
+    }
+
+    html += `</div>`; // .dash-tuning-panel
     return html;
 }
 
@@ -184,7 +359,7 @@ function buildKPICards(summary, config) {
 }
 
 // ---------------------------------------------------------------------------
-// Executor Scaling Timeline
+// 1. Executor Scaling Timeline (with Pending Tasks)
 // ---------------------------------------------------------------------------
 
 function renderExecutorTimeline(analysis) {
@@ -198,7 +373,7 @@ function renderExecutorTimeline(analysis) {
 
     // Build step data — running count of active executors
     let count = 0;
-    const dataPoints = [{ x: 0, y: 0 }]; // start at zero
+    const executorPoints = [{ x: 0, y: 0 }];
 
     events.forEach(ev => {
         const secFromStart = (ev.timestamp - startTime) / 1000;
@@ -207,7 +382,7 @@ function renderExecutorTimeline(analysis) {
         } else if (ev.event === "removed") {
             count = Math.max(0, count - 1);
         }
-        dataPoints.push({ x: Math.round(secFromStart * 10) / 10, y: count });
+        executorPoints.push({ x: Math.round(secFromStart * 10) / 10, y: count });
     });
 
     // Add endpoint if we have stage data
@@ -217,33 +392,59 @@ function renderExecutorTimeline(analysis) {
         if (lastStage.completion_time_iso) {
             const endTs = new Date(lastStage.completion_time_iso).getTime();
             const endSec = (endTs - startTime) / 1000;
-            if (endSec > dataPoints[dataPoints.length - 1].x) {
-                dataPoints.push({ x: Math.round(endSec * 10) / 10, y: count });
+            if (endSec > executorPoints[executorPoints.length - 1].x) {
+                executorPoints.push({ x: Math.round(endSec * 10) / 10, y: count });
             }
         }
     }
 
+    // Build pending tasks data
+    const pendingTimeline = analysis.pending_task_timeline || [];
+    const pendingPoints = pendingTimeline.map(pt => ({
+        x: Math.round(((pt.timestamp - startTime) / 1000) * 10) / 10,
+        y: pt.pending,
+    }));
+
     const chart = new Chart(canvas, {
         type: "line",
         data: {
-            datasets: [{
-                label: "Active Executors",
-                data: dataPoints,
-                borderColor: "#6c7aff",
-                backgroundColor: "rgba(108, 122, 255, 0.12)",
-                fill: true,
-                stepped: true,
-                borderWidth: 2,
-                pointRadius: 4,
-                pointBackgroundColor: "#6c7aff",
-                pointBorderColor: "#1c1f2e",
-                pointBorderWidth: 2,
-                tension: 0,
-            }],
+            datasets: [
+                {
+                    label: "Active Executors",
+                    data: executorPoints,
+                    borderColor: "#6c7aff",
+                    backgroundColor: "rgba(108, 122, 255, 0.12)",
+                    fill: true,
+                    stepped: true,
+                    borderWidth: 2,
+                    pointRadius: 4,
+                    pointBackgroundColor: "#6c7aff",
+                    pointBorderColor: "#1c1f2e",
+                    pointBorderWidth: 2,
+                    tension: 0,
+                    yAxisID: "y",
+                },
+                {
+                    label: "Pending Tasks",
+                    data: pendingPoints,
+                    borderColor: "#f59e0b",
+                    backgroundColor: "rgba(245, 158, 11, 0.08)",
+                    fill: true,
+                    stepped: false,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.3,
+                    yAxisID: "y1",
+                },
+            ],
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            interaction: {
+                mode: "index",
+                intersect: false,
+            },
             scales: {
                 x: {
                     type: "linear",
@@ -252,14 +453,25 @@ function renderExecutorTimeline(analysis) {
                     grid: { color: "rgba(255,255,255,0.04)" },
                 },
                 y: {
+                    position: "left",
                     beginAtZero: true,
                     title: { display: true, text: "Executor Count", color: "#9498ab", font: { size: 11 } },
                     ticks: { color: "#5d6177", font: { size: 10 }, stepSize: 1 },
                     grid: { color: "rgba(255,255,255,0.04)" },
                 },
+                y1: {
+                    position: "right",
+                    beginAtZero: true,
+                    title: { display: true, text: "Pending Tasks", color: "#f59e0b", font: { size: 11 } },
+                    ticks: { color: "#f59e0b", font: { size: 10 } },
+                    grid: { drawOnChartArea: false },
+                },
             },
             plugins: {
-                legend: { display: false },
+                legend: {
+                    display: true,
+                    labels: { color: "#9498ab", font: { size: 11 }, boxWidth: 12, padding: 16 },
+                },
                 tooltip: {
                     backgroundColor: "#232738",
                     titleColor: "#e8eaf0",
@@ -268,7 +480,6 @@ function renderExecutorTimeline(analysis) {
                     borderWidth: 1,
                     callbacks: {
                         title: (items) => `${items[0].parsed.x}s from start`,
-                        label: (item) => `Executors: ${item.parsed.y}`,
                     },
                 },
             },
@@ -278,30 +489,186 @@ function renderExecutorTimeline(analysis) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage Performance Breakdown
+// 2. Task Distribution & Core Parallelism
 // ---------------------------------------------------------------------------
 
-function renderStageBreakdown(analysis) {
-    const canvas = document.getElementById("stageBreakdownChart");
+function renderTaskDistribution(analysis) {
+    const canvas = document.getElementById("taskDistributionChart");
+    if (!canvas) return;
+
+    const dist = analysis.executor_task_distribution || [];
+    if (dist.length === 0) return;
+
+    const labels = dist.map(d => `Exec ${d.executor_id}`);
+    const tasksData = dist.map(d => d.tasks_processed);
+    const coresData = dist.map(d => d.avg_active_cores);
+
+    // Custom plugin: draws a horizontal line across each bar's width
+    const coresLinePlugin = {
+        id: "coresLine",
+        afterDatasetsDraw(chart) {
+            const { ctx } = chart;
+            const meta = chart.getDatasetMeta(0); // the bar dataset
+            const yScale = chart.scales.y1;
+            if (!meta || !yScale) return;
+
+            ctx.save();
+            ctx.strokeStyle = "#6c7aff";
+            ctx.lineWidth = 3;
+            ctx.setLineDash([]);
+
+            meta.data.forEach((bar, i) => {
+                const coreVal = coresData[i];
+                if (coreVal == null) return;
+                const yPos = yScale.getPixelForValue(coreVal);
+                const halfWidth = bar.width / 2;
+                ctx.beginPath();
+                ctx.moveTo(bar.x - halfWidth, yPos);
+                ctx.lineTo(bar.x + halfWidth, yPos);
+                ctx.stroke();
+
+                // Small dot at center for emphasis
+                ctx.fillStyle = "#6c7aff";
+                ctx.beginPath();
+                ctx.arc(bar.x, yPos, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.restore();
+        },
+    };
+
+    const chart = new Chart(canvas, {
+        type: "bar",
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: "Tasks Processed",
+                    data: tasksData,
+                    backgroundColor: "#34d399",
+                    borderRadius: 4,
+                    yAxisID: "y",
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    ticks: { color: "#9498ab", font: { size: 11, weight: "600" } },
+                    grid: { display: false },
+                },
+                y: {
+                    position: "left",
+                    beginAtZero: true,
+                    title: { display: true, text: "Total Tasks", color: "#34d399", font: { size: 11 } },
+                    ticks: { color: "#34d399", font: { size: 10 } },
+                    grid: { color: "rgba(255,255,255,0.04)" },
+                },
+                y1: {
+                    position: "right",
+                    beginAtZero: true,
+                    suggestedMax: Math.max(...coresData) + 1,
+                    title: { display: true, text: "Avg Active Cores", color: "#6c7aff", font: { size: 11 } },
+                    ticks: { color: "#6c7aff", font: { size: 10 }, stepSize: 1 },
+                    grid: { drawOnChartArea: false },
+                },
+            },
+            plugins: {
+                legend: {
+                    position: "top",
+                    labels: {
+                        color: "#9498ab", font: { size: 11 }, boxWidth: 12, padding: 16,
+                        generateLabels: (chart) => {
+                            const defaultLabels = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+                            defaultLabels.push({
+                                text: "Avg Active Cores",
+                                fillStyle: "#6c7aff",
+                                strokeStyle: "#6c7aff",
+                                lineWidth: 3,
+                                hidden: false,
+                            });
+                            return defaultLabels;
+                        },
+                    },
+                },
+                tooltip: {
+                    backgroundColor: "#232738",
+                    titleColor: "#e8eaf0",
+                    bodyColor: "#9498ab",
+                    borderColor: "rgba(255,255,255,0.1)",
+                    borderWidth: 1,
+                    callbacks: {
+                        afterBody: (items) => {
+                            const idx = items[0]?.dataIndex;
+                            if (idx != null && coresData[idx] != null) {
+                                return `Avg Active Cores: ${coresData[idx]}`;
+                            }
+                            return "";
+                        },
+                    },
+                },
+            },
+        },
+        plugins: [coresLinePlugin],
+    });
+    _dashCharts.push(chart);
+}
+
+// ---------------------------------------------------------------------------
+// 3. Stage Performance Breakdown — Waterfall Timeline
+// ---------------------------------------------------------------------------
+
+function renderStageWaterfall(analysis) {
+    const canvas = document.getElementById("stageWaterfallChart");
     if (!canvas) return;
 
     const stages = analysis.stages || [];
     if (stages.length === 0) return;
 
+    const startTime = analysis.metadata?.start_time || 0;
+
     const labels = stages.map(s => `S${s.stage_id}`);
-    const computeData = [];
-    const delayData = [];
-    const gcData = [];
+
+    // For each stage, compute start/end offset in seconds and segment breakdown
+    const computeBars = [];
+    const gcBars = [];
+    const delayBars = [];
 
     stages.forEach(s => {
-        const totalRunMs = s.task_summary?.run_time_ms?.total || 0;
-        const gcMs = s.task_summary?.gc_time_ms?.total || 0;
-        const schedulingDelay = s.scheduling_delay_ms || 0;
-        const computeMs = Math.max(0, totalRunMs - gcMs);
+        // Parse stage submission/completion to seconds from app start
+        const subIso = s.submission_time_iso;
+        const compIso = s.completion_time_iso;
+        if (!subIso || !compIso) {
+            computeBars.push([0, 0]);
+            gcBars.push([0, 0]);
+            delayBars.push([0, 0]);
+            return;
+        }
 
-        computeData.push(computeMs);
-        delayData.push(schedulingDelay);
-        gcData.push(gcMs);
+        const subSec = (new Date(subIso).getTime() - startTime) / 1000;
+        const compSec = (new Date(compIso).getTime() - startTime) / 1000;
+
+        const schedulingDelaySec = (s.scheduling_delay_ms || 0) / 1000;
+        const gcSec = (s.task_summary?.gc_time_ms?.total || 0) / 1000;
+        const totalRunSec = (s.task_summary?.run_time_ms?.total || 0) / 1000;
+        const computeSec = Math.max(0, totalRunSec - gcSec);
+
+        // Segments stacked within the stage's time window
+        const stageSpan = compSec - subSec;
+        const rawTotal = schedulingDelaySec + computeSec + gcSec;
+
+        // Scale segments to fit within the visible stage span
+        const scale = rawTotal > 0 ? stageSpan / rawTotal : 1;
+
+        const delayEnd = subSec + schedulingDelaySec * scale;
+        const computeEnd = delayEnd + computeSec * scale;
+        const gcEnd = computeEnd + gcSec * scale;
+
+        delayBars.push([subSec, delayEnd]);
+        computeBars.push([delayEnd, computeEnd]);
+        gcBars.push([computeEnd, gcEnd]);
     });
 
     const chart = new Chart(canvas, {
@@ -310,22 +677,25 @@ function renderStageBreakdown(analysis) {
             labels,
             datasets: [
                 {
-                    label: "Compute",
-                    data: computeData,
-                    backgroundColor: "#34d399",
-                    borderRadius: 2,
-                },
-                {
                     label: "Scheduling Delay",
-                    data: delayData,
+                    data: delayBars,
                     backgroundColor: "#fbbf24",
                     borderRadius: 2,
+                    barThickness: 30,
+                },
+                {
+                    label: "Compute",
+                    data: computeBars,
+                    backgroundColor: "#34d399",
+                    borderRadius: 2,
+                    barThickness: 30,
                 },
                 {
                     label: "GC Time",
-                    data: gcData,
+                    data: gcBars,
                     backgroundColor: "#f87171",
                     borderRadius: 2,
+                    barThickness: 30,
                 },
             ],
         },
@@ -335,8 +705,8 @@ function renderStageBreakdown(analysis) {
             indexAxis: "y",
             scales: {
                 x: {
-                    stacked: true,
-                    title: { display: true, text: "Milliseconds", color: "#9498ab", font: { size: 11 } },
+                    type: "linear",
+                    title: { display: true, text: "Seconds from App Start", color: "#9498ab", font: { size: 11 } },
                     ticks: { color: "#5d6177", font: { size: 10 } },
                     grid: { color: "rgba(255,255,255,0.04)" },
                 },
@@ -363,7 +733,144 @@ function renderStageBreakdown(analysis) {
                             const stage = stages[idx];
                             return stage ? stage.stage_name.substring(0, 50) : "";
                         },
-                        label: (item) => ` ${item.dataset.label}: ${fmtDurationMs(item.raw)}`,
+                        label: (item) => {
+                            const range = item.raw;
+                            if (Array.isArray(range)) {
+                                const dur = range[1] - range[0];
+                                return ` ${item.dataset.label}: ${dur.toFixed(1)}s`;
+                            }
+                            return ` ${item.dataset.label}: ${item.raw}`;
+                        },
+                    },
+                },
+            },
+            onClick: (_event, elements) => {
+                if (elements.length > 0 && _dashAnalysis) {
+                    const idx = elements[0].index;
+                    const stage = stages[idx];
+                    if (stage) {
+                        renderStageTaskBins(_dashAnalysis, stage.stage_id);
+                    }
+                }
+            },
+        },
+    });
+    _dashCharts.push(chart);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Stage Task Breakdown (Binned)
+// ---------------------------------------------------------------------------
+
+function renderStageTaskBins(analysis, stageId) {
+    const canvas = document.getElementById("stageTaskBinsChart");
+    const label = document.getElementById("stageTaskBinsLabel");
+    if (!canvas) return;
+
+    const stb = analysis.stage_task_bins || {};
+    const stageBins = (stb.stages || {})[String(stageId)];
+    if (!stageBins || stageBins.length === 0) {
+        if (label) label.textContent = `Stage ${stageId} — no task data`;
+        return;
+    }
+
+    // Find the stage name
+    const stages = analysis.stages || [];
+    const stageInfo = stages.find(s => s.stage_id === stageId);
+    const stageName = stageInfo ?
+        `Stage ${stageId}: ${stageInfo.stage_name?.substring(0, 60) || ""}` :
+        `Stage ${stageId}`;
+    if (label) label.textContent = stageName;
+
+    const binLabels = stageBins.map(b => b.label);
+    // Convert ms to seconds for compute; spill stays in bytes for tooltip
+    const computeData = stageBins.map(b => Math.max(0, (b.avg_duration_ms - b.avg_gc_ms)) / 1000);
+    const gcData = stageBins.map(b => b.avg_gc_ms / 1000);
+    const spillData = stageBins.map(b => b.avg_spill_bytes);
+
+    // Destroy existing task bins chart if present
+    const existingIdx = _dashCharts.findIndex(c => c.canvas === canvas);
+    if (existingIdx !== -1) {
+        _dashCharts[existingIdx].destroy();
+        _dashCharts.splice(existingIdx, 1);
+    }
+
+    const chart = new Chart(canvas, {
+        type: "bar",
+        data: {
+            labels: binLabels,
+            datasets: [
+                {
+                    label: "Compute Time",
+                    data: computeData,
+                    backgroundColor: "#34d399",
+                    borderRadius: 2,
+                    yAxisID: "y",
+                },
+                {
+                    label: "GC Time",
+                    data: gcData,
+                    backgroundColor: "#f87171",
+                    borderRadius: 2,
+                    yAxisID: "y",
+                },
+                {
+                    label: "Disk Spill",
+                    data: spillData,
+                    backgroundColor: "#fbbf24",
+                    borderRadius: 2,
+                    yAxisID: "y1",
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    stacked: true,
+                    ticks: { color: "#9498ab", font: { size: 10 } },
+                    grid: { display: false },
+                },
+                y: {
+                    stacked: true,
+                    position: "left",
+                    beginAtZero: true,
+                    title: { display: true, text: "Duration (seconds)", color: "#9498ab", font: { size: 11 } },
+                    ticks: { color: "#5d6177", font: { size: 10 } },
+                    grid: { color: "rgba(255,255,255,0.04)" },
+                },
+                y1: {
+                    stacked: true,
+                    position: "right",
+                    beginAtZero: true,
+                    title: { display: true, text: "Disk Spill (bytes)", color: "#fbbf24", font: { size: 11 } },
+                    ticks: {
+                        color: "#fbbf24",
+                        font: { size: 10 },
+                        callback: (val) => fmtBytes(val),
+                    },
+                    grid: { drawOnChartArea: false },
+                },
+            },
+            plugins: {
+                legend: {
+                    position: "top",
+                    labels: { color: "#9498ab", font: { size: 11 }, boxWidth: 12, padding: 16 },
+                },
+                tooltip: {
+                    backgroundColor: "#232738",
+                    titleColor: "#e8eaf0",
+                    bodyColor: "#9498ab",
+                    borderColor: "rgba(255,255,255,0.1)",
+                    borderWidth: 1,
+                    callbacks: {
+                        label: (item) => {
+                            if (item.dataset.label === "Disk Spill") {
+                                return ` ${item.dataset.label}: ${fmtBytes(item.raw)}`;
+                            }
+                            return ` ${item.dataset.label}: ${item.raw.toFixed(2)}s`;
+                        },
                     },
                 },
             },

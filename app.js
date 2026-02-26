@@ -398,14 +398,19 @@ function renderDbxPanel(data) {
 
     let html = `<div class="dbx-panel">`;
 
-    // Job name as clickable link to cluster page
+    // Job name as clickable link to cluster page + refresh button
     const title = esc(rd.jobName || "Databricks Run");
     const cachedLabel = isCached ? ` <span class="dbx-cached-label">(cached)</span>` : "";
+    html += `<div class="dbx-header-row">`;
     if (host && clusterId) {
         html += `<a class="dbx-title-link" href="${host}/compute/clusters/${esc(clusterId)}" target="_blank" rel="noopener">${title} ↗</a>${cachedLabel}`;
     } else {
         html += `<div class="dbx-title">${title}${cachedLabel}</div>`;
     }
+    html += `<button class="dbx-refresh-btn" onclick="refreshDbxPanel(this, '${esc(data.databricksJobId || '')}', '${esc(jobRunId)}')" title="Refresh DBX data">`;
+    html += `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>`;
+    html += ` Refresh</button>`;
+    html += `</div>`;
 
     // Metric boxes row
     const setupMs = rd.timing?.setupDurationMs;
@@ -543,6 +548,37 @@ async function downloadEventLog(clusterId, jobRunId) {
 
     } catch (e) {
         row.innerHTML = `<div class="eventlog-error">⚠ ${esc(e.message)}</div>`;
+    }
+}
+
+// ---- Refresh DBX Panel ------------------------------------
+async function refreshDbxPanel(btn, dbxId, jobRunId) {
+    const detailRow = btn.closest(".dbx-detail-row");
+    if (!detailRow) return;
+
+    const flowName = flows[activeFlowIndex]?.name || "";
+    const cell = detailRow.querySelector(".dbx-detail-cell");
+    cell.innerHTML = `<div class="dbx-loading"><span class="spinner"></span> Refreshing Databricks data…</div>`;
+
+    // Remove from analyzedJobs so "Download Event Log" button reappears
+    const flow = flows[activeFlowIndex];
+    if (flow && flow.analyzedJobs) {
+        flow.analyzedJobs = flow.analyzedJobs.filter(id => id !== String(jobRunId));
+    }
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/databricks/refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ databricksJobId: dbxId, flowName, jobRunId }),
+        });
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+        data._jobRunId = jobRunId;
+        data._flowName = flowName;
+        cell.innerHTML = renderDbxPanel(data);
+    } catch (e) {
+        cell.innerHTML = `<div class="dbx-error">⚠ ${esc(e.message)}</div>`;
     }
 }
 

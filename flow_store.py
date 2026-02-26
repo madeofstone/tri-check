@@ -194,6 +194,27 @@ def list_dbx_cached_jobs(name: str) -> list[str]:
     return [p.stem for p in dbx_dir.glob("*.json")]
 
 
+def clear_dbx_job(name: str, job_run_id: str) -> bool:
+    """
+    Remove cached DBX details and event log analysis for a specific job run.
+    Returns True if anything was deleted.
+    """
+    deleted = False
+    # Remove DBX cache file
+    dbx_file = _flow_dir(name) / "dbx" / f"{job_run_id}.json"
+    if dbx_file.exists():
+        dbx_file.unlink()
+        log.info(f"Cleared DBX cache for flow='{name}' job={job_run_id}")
+        deleted = True
+    # Remove eventlog analysis directory
+    el_dir = _flow_dir(name) / "eventlogs" / str(job_run_id)
+    if el_dir.exists():
+        shutil.rmtree(el_dir)
+        log.info(f"Cleared eventlog data for flow='{name}' job={job_run_id}")
+        deleted = True
+    return deleted
+
+
 # ---------------------------------------------------------------------------
 # Event Log Paths
 # ---------------------------------------------------------------------------
