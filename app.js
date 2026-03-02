@@ -56,6 +56,9 @@ settingsModal.addEventListener("click", (e) => {
 // Load saved flows on startup
 loadSavedFlows();
 
+// Initialize All Jobs tab
+ajInit();
+
 // ---- Load Saved Flows on Startup --------------------------
 async function loadSavedFlows() {
     try {
@@ -394,7 +397,8 @@ function renderDbxPanel(data) {
     const flowName = data._flowName || "";
     const isCached = data.cached === true;
     const flow = flows[activeFlowIndex];
-    const isAnalyzed = flow?.analyzedJobs?.includes(String(jobRunId));
+    const isAnalyzed = flow?.analyzedJobs?.includes(String(jobRunId))
+        || data._isAnalyzed === true;
 
     let html = `<div class="dbx-panel">`;
 
@@ -431,10 +435,10 @@ function renderDbxPanel(data) {
         html += `<div class="dbx-eventlog-row" id="eventlog-row-${esc(jobRunId)}">`;
         if (isAnalyzed) {
             html += `<div class="eventlog-complete"><div class="eventlog-success-title">✅ Analysis Complete`;
-            html += `<button class="dash-open-btn" onclick="viewDashboard('${esc(jobRunId)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg> Dashboard</button>`;
+            html += `<button class="dash-open-btn" onclick="viewDashboard('${esc(jobRunId)}', '${esc(flowName)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg> Dashboard</button>`;
             html += `</div></div>`;
         } else {
-            html += `<button class="eventlog-btn" onclick="downloadEventLog('${esc(clusterId)}', '${esc(jobRunId)}')">`;
+            html += `<button class="eventlog-btn" onclick="downloadEventLog('${esc(clusterId)}', '${esc(jobRunId)}', '${esc(flowName)}')">`;
             html += `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="16" height="16"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
             html += ` Download Event Log</button>`;
         }
@@ -495,11 +499,15 @@ function renderDbxPanel(data) {
 }
 
 // ---- Event Log Download -----------------------------------
-async function downloadEventLog(clusterId, jobRunId) {
+async function downloadEventLog(clusterId, jobRunId, flowName) {
     const row = document.getElementById(`eventlog-row-${jobRunId}`);
     if (!row) return;
 
-    const flowName = flows[activeFlowIndex]?.name || "";
+    // Use provided flowName, fall back to active flow
+    if (!flowName && flows[activeFlowIndex]) {
+        flowName = flows[activeFlowIndex].name || "";
+    }
+    flowName = flowName || "";
 
     // Show loading state
     row.innerHTML = `<div class="eventlog-loading"><span class="spinner"></span> Downloading & analyzing event log…</div>`;
@@ -535,11 +543,11 @@ async function downloadEventLog(clusterId, jobRunId) {
             html += `<span class="dbx-tag">Shuffle/Input: <strong>${summary.shuffle_to_input_ratio}x</strong></span>`;
         }
         html += `</div>`;
-        html += `<button class="dash-open-btn" onclick="viewDashboard('${esc(jobRunId)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg> Dashboard</button>`;
+        html += `<button class="dash-open-btn" onclick="viewDashboard('${esc(jobRunId)}', '${esc(flowName)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg> Dashboard</button>`;
         html += `</div>`;
         row.innerHTML = html;
 
-        // Update the flow's analyzedJobs list so button stays hidden on re-render
+        // Update the flow's analyzedJobs list so button stays on re-render
         const flow = flows[activeFlowIndex];
         if (flow && !flow.analyzedJobs?.includes(String(jobRunId))) {
             flow.analyzedJobs = flow.analyzedJobs || [];
@@ -583,8 +591,12 @@ async function refreshDbxPanel(btn, dbxId, jobRunId) {
 }
 
 // ---- View Dashboard ---------------------------------------
-async function viewDashboard(jobRunId) {
-    const flowName = flows[activeFlowIndex]?.name || "";
+async function viewDashboard(jobRunId, flowName) {
+    // Use provided flowName, fall back to active flow
+    if (!flowName && flows[activeFlowIndex]) {
+        flowName = flows[activeFlowIndex].name || "";
+    }
+    flowName = flowName || "";
     try {
         const url = flowName
             ? `${API_BASE}/api/eventlog/${encodeURIComponent(jobRunId)}?flowName=${encodeURIComponent(flowName)}`

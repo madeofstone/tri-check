@@ -1,6 +1,7 @@
 # ---- Runtime data (user-specific, generated at runtime) ----
 flows/
 jobs/
+tri-tracker.db
 
 # ---- Environment & secrets ---------------------------------
 .env

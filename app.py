@@ -22,7 +22,8 @@ from config import Config
 from platform_api import PlatformAPI, PlatformAPIError
 from databricks_client import DatabricksClient, DatabricksClientError
 from dbfs_eventlog import download_eventlog, EventLogError
-import flow_store
+import flow_store  # kept for eventlog_dir and list_analyzed_jobs (file-based)
+import db
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)
@@ -158,7 +159,6 @@ def extract_job_summary(job_data: dict) -> dict:
     if inner_job:
         execution_language = inner_job.get("executionLanguage")
         # Parse databricksJobId from cpJobId JSON string
-        # e.g. cpJobId: '{"databricksWorkspaceId":"...","databricksJobId":"943293893227722"}'
         cp_job_id_raw = inner_job.get("cpJobId")
         if cp_job_id_raw and isinstance(cp_job_id_raw, str):
             try:
@@ -167,12 +167,28 @@ def extract_job_summary(job_data: dict) -> dict:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+    # Extract ranfor, ranfrom, and creator email (API uses lowercase keys)
+    ran_for = job_data.get("ranfor", "")
+    ran_from = job_data.get("ranfrom", "")
+    creator_email = ""
+    # creator email may be in updater or creator object
+    updater = job_data.get("updater")
+    if updater and isinstance(updater, dict):
+        creator_email = updater.get("email", "")
+    if not creator_email:
+        creator = job_data.get("creator")
+        if creator and isinstance(creator, dict):
+            creator_email = creator.get("email", "")
+
     return {
         "jobRunId": job_data.get("id"),
         "jobGroupId": job_data.get("id"),
         "status": job_data.get("status"),
         "flowId": flow_id,
         "flowName": flow_name,
+        "ranFor": ran_for,
+        "ranFrom": ran_from,
+        "creatorEmail": creator_email,
         "createdAt": created_at,
         "updatedAt": updated_at,
         "executionTimeMinutes": compute_execution_minutes(created_at, updated_at),
@@ -294,7 +310,7 @@ def fetch_jobs():
     }
 
     # Merge with existing saved data and persist
-    merged_pairs = flow_store.merge_jobs(flow_name, new_pairs, metadata)
+    merged_pairs = db.merge_jobs_flow(flow_name, new_pairs, metadata)
 
     results["pairs"] = merged_pairs
     results["matchWindowMinutes"] = window
@@ -303,9 +319,9 @@ def fetch_jobs():
     results["onpremBaseUrl"] = onprem_base
     results["onpremEnabled"] = onprem_enabled
 
-    # Include cache status for the frontend
+    # Include cache status for the frontend (eventlogs are still file-based)
     results["analyzedJobs"] = flow_store.list_analyzed_jobs(flow_name)
-    results["dbxCachedJobs"] = flow_store.list_dbx_cached_jobs(flow_name)
+    results["dbxCachedJobs"] = db.list_dbx_cached_jobs(flow_name)
 
     return jsonify(results)
 
@@ -322,7 +338,7 @@ def fetch_databricks_details():
 
     # Check cache first
     if flow_name and job_run_id:
-        cached = flow_store.load_dbx(flow_name, str(job_run_id))
+        cached = db.load_dbx(flow_name, str(job_run_id))
         if cached:
             cached["cached"] = True
             return jsonify(cached)
@@ -353,7 +369,7 @@ def fetch_databricks_details():
 
         # Save to cache
         if flow_name and job_run_id:
-            flow_store.save_dbx(flow_name, str(job_run_id), response_data)
+            db.save_dbx(flow_name, str(job_run_id), response_data)
 
         return jsonify(response_data)
     except DatabricksClientError as e:
@@ -373,7 +389,8 @@ def refresh_databricks_details():
 
     # Clear cached data
     if flow_name and job_run_id:
-        flow_store.clear_dbx_job(flow_name, str(job_run_id))
+        db.clear_dbx_job(flow_name, str(job_run_id))
+        flow_store.clear_dbx_job(flow_name, str(job_run_id))  # also clear file-based eventlogs
 
     if not Config.DATABRICKS_HOST or not Config.DATABRICKS_TOKEN:
         return jsonify({"error": "DATABRICKS_HOST and DATABRICKS_TOKEN must be configured"}), 400
@@ -400,7 +417,7 @@ def refresh_databricks_details():
 
         # Save fresh data to cache
         if flow_name and job_run_id:
-            flow_store.save_dbx(flow_name, str(job_run_id), response_data)
+            db.save_dbx(flow_name, str(job_run_id), response_data)
 
         return jsonify(response_data)
     except DatabricksClientError as e:
@@ -422,11 +439,9 @@ def fetch_eventlog():
     if not Config.DATABRICKS_HOST or not Config.DATABRICKS_TOKEN:
         return jsonify({"error": "DATABRICKS_HOST and DATABRICKS_TOKEN must be configured"}), 400
 
-    # Determine storage directory
-    if flow_name:
-        job_dir = Path(flow_store.eventlog_dir(flow_name, str(job_run_id)))
-    else:
-        job_dir = LEGACY_JOBS_DIR / str(job_run_id)
+    # Always store in jobs/<jobRunId>/ directory
+    job_dir = LEGACY_JOBS_DIR / str(job_run_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
     analysis_file = job_dir / "analysis.json"
 
     # Return cached analysis if it exists
@@ -474,12 +489,25 @@ def fetch_eventlog():
 @app.route("/api/eventlog/<job_run_id>", methods=["GET"])
 def get_eventlog_analysis(job_run_id):
     """Return previously generated analysis.json for a job run."""
-    # Check flow-based storage first
-    flow_name = request.args.get("flowName", "").strip()
-    if flow_name:
-        analysis_file = Path(flow_store.eventlog_dir(flow_name, str(job_run_id))) / "analysis.json"
-    else:
-        analysis_file = LEGACY_JOBS_DIR / str(job_run_id) / "analysis.json"
+    # Primary: check jobs/<id>/
+    analysis_file = LEGACY_JOBS_DIR / str(job_run_id) / "analysis.json"
+
+    # Fallback: check flow-based storage for backwards compatibility
+    if not analysis_file.exists():
+        flow_name = request.args.get("flowName", "").strip()
+        if flow_name:
+            alt = Path(flow_store.eventlog_dir(flow_name, str(job_run_id))) / "analysis.json"
+            if alt.exists():
+                analysis_file = alt
+        # Also scan all flow directories
+        if not analysis_file.exists():
+            flows_dir = Path(__file__).resolve().parent / "flows"
+            if flows_dir.exists():
+                for fd in flows_dir.iterdir():
+                    candidate = fd / "eventlogs" / str(job_run_id) / "analysis.json"
+                    if candidate.exists():
+                        analysis_file = candidate
+                        break
 
     if not analysis_file.exists():
         return jsonify({"error": "No analysis found for this job run", "exists": False}), 404
@@ -490,11 +518,14 @@ def get_eventlog_analysis(job_run_id):
 @app.route("/api/flows", methods=["GET"])
 def get_flows():
     """Return list of saved flows with their cached data."""
-    flows_list = flow_store.list_flows()
+    flows_list = db.list_flows()
     result = []
     for f in flows_list:
-        flow_data = flow_store.load_flow(f["name"])
+        flow_data = db.load_flow(f["name"])
         if flow_data:
+            # Add analyzed jobs info (file-based)
+            flow_data["analyzedJobs"] = flow_store.list_analyzed_jobs(f["name"])
+            flow_data["dbxCachedJobs"] = db.list_dbx_cached_jobs(f["name"])
             result.append(flow_data)
     return jsonify({"flows": result})
 
@@ -502,8 +533,9 @@ def get_flows():
 @app.route("/api/flows/<path:flow_name>", methods=["DELETE"])
 def remove_flow(flow_name):
     """Remove a flow and all its data."""
-    deleted = flow_store.delete_flow(flow_name)
-    return jsonify({"success": deleted})
+    db.delete_flow(flow_name)
+    deleted = flow_store.delete_flow(flow_name)  # clean up file-based data too
+    return jsonify({"success": True})
 
 
 @app.route("/api/config", methods=["GET"])
@@ -541,8 +573,179 @@ def update_config():
 
 
 # ---------------------------------------------------------------------------
+# All Jobs API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/all-jobs/fetch", methods=["POST"])
+def fetch_all_jobs():
+    """Fetch latest jobs from AACP and store in SQLite."""
+    body = request.get_json(silent=True) or {}
+    count = body.get("count", 100)  # initial fetch count
+    refresh = body.get("refresh", False)  # True = incremental from latest known
+
+    if not Config.PLATFORM_API_TOKEN or not Config.PLATFORM_API_BASE_URL:
+        return jsonify({"error": "PLATFORM_API_BASE_URL and PLATFORM_API_TOKEN must be configured"}), 400
+
+    try:
+        api = PlatformAPI(
+            token=Config.PLATFORM_API_TOKEN,
+            base_url=Config.PLATFORM_API_BASE_URL,
+        )
+
+        stop_at_id = None
+        if refresh:
+            stop_at_id = db.get_latest_job_id("aacp")
+
+        all_jobs = []
+        offset = 0
+        page_size = 25
+
+        while len(all_jobs) < count:
+            raw_jobs, has_more = api.get_all_jobs(
+                limit=page_size, offset=offset, stop_at_id=stop_at_id
+            )
+            summaries = [extract_job_summary(j) for j in raw_jobs]
+            all_jobs.extend(summaries)
+            offset += page_size
+
+            if not has_more:
+                break
+
+        # Store in SQLite
+        db.upsert_jobs(all_jobs, source="aacp")
+
+        return jsonify({
+            "fetched": len(all_jobs),
+            "message": f"Fetched {len(all_jobs)} jobs",
+        })
+    except PlatformAPIError as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/all-jobs/load-more", methods=["POST"])
+def load_more_jobs():
+    """Fetch next page of jobs from AACP API and store."""
+    body = request.get_json(silent=True) or {}
+    offset = body.get("offset", 0)
+
+    if not Config.PLATFORM_API_TOKEN or not Config.PLATFORM_API_BASE_URL:
+        return jsonify({"error": "PLATFORM_API_BASE_URL and PLATFORM_API_TOKEN must be configured"}), 400
+
+    try:
+        api = PlatformAPI(
+            token=Config.PLATFORM_API_TOKEN,
+            base_url=Config.PLATFORM_API_BASE_URL,
+        )
+        raw_jobs, has_more = api.get_all_jobs(limit=25, offset=offset)
+        summaries = [extract_job_summary(j) for j in raw_jobs]
+        db.upsert_jobs(summaries, source="aacp")
+
+        return jsonify({
+            "fetched": len(summaries),
+            "hasMore": has_more,
+            "nextOffset": offset + 25,
+        })
+    except PlatformAPIError as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/all-jobs/refresh", methods=["POST"])
+def refresh_all_jobs():
+    """Re-fetch all existing jobs from AACP to update their statuses.
+
+    Counts how many jobs we have in the DB, then pages through
+    that many from the API (in 25-job chunks) and upserts them.
+    DBX cache is untouched — only job columns are updated.
+    """
+    if not Config.PLATFORM_API_TOKEN or not Config.PLATFORM_API_BASE_URL:
+        return jsonify({"error": "PLATFORM_API_BASE_URL and PLATFORM_API_TOKEN must be configured"}), 400
+
+    try:
+        stats = db.get_kpi_stats("aacp")
+        total_in_db = stats.get("total_jobs", 0)
+        if total_in_db == 0:
+            return jsonify({"refreshed": 0, "message": "No jobs to refresh"})
+
+        api = PlatformAPI(
+            token=Config.PLATFORM_API_TOKEN,
+            base_url=Config.PLATFORM_API_BASE_URL,
+        )
+
+        all_jobs = []
+        offset = 0
+        page_size = 25
+
+        while offset < total_in_db:
+            raw_jobs, has_more = api.get_all_jobs(limit=page_size, offset=offset)
+            summaries = [extract_job_summary(j) for j in raw_jobs]
+            all_jobs.extend(summaries)
+            offset += page_size
+
+            if not has_more:
+                break
+
+        db.upsert_jobs(all_jobs, source="aacp")
+
+        return jsonify({
+            "refreshed": len(all_jobs),
+            "totalInDb": total_in_db,
+            "message": f"Refreshed {len(all_jobs)} jobs",
+        })
+    except PlatformAPIError as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/all-jobs", methods=["GET"])
+def query_all_jobs():
+    """Query stored jobs with filters and pagination."""
+    offset = request.args.get("offset", 0, type=int)
+    limit = request.args.get("limit", 50, type=int)
+    group = request.args.get("group", "", type=str)
+
+    filters = {}
+    for key in ("status", "flow_id", "flow_name", "creator_email", "ran_for", "search", "days"):
+        val = request.args.get(key, "").strip()
+        if val:
+            filters[key] = val
+
+    if group == "flow":
+        groups = db.get_jobs_grouped_by_flow(filters=filters)
+        return jsonify({"grouped": True, "groups": groups})
+
+    jobs, total = db.get_jobs(filters=filters, offset=offset, limit=limit)
+    return jsonify({
+        "jobs": jobs,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "hasMore": offset + limit < total,
+    })
+
+
+@app.route("/api/all-jobs/kpis", methods=["GET"])
+def all_jobs_kpis():
+    """Return KPI stats for the All Jobs tab."""
+    days = request.args.get("days", 30, type=int)
+    stats = db.get_kpi_stats("aacp", days=days)
+    return jsonify(stats)
+
+
+@app.route("/api/all-jobs/daily-chart", methods=["GET"])
+def all_jobs_daily_chart():
+    """Return daily job counts (success/failed/other) for bar chart."""
+    days = request.args.get("days", 30, type=int)
+    status_filter = request.args.get("status", "", type=str).strip()
+    data = db.get_daily_job_counts(source="aacp", days=days, status_filter=status_filter)
+    return jsonify({"days": data})
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+# Initialize DB on import
+db.init_db()
+db.migrate_from_files()
 
 if __name__ == "__main__":
     print("🚀 Tri-Tracker starting on http://localhost:5050")

@@ -109,3 +109,55 @@ class PlatformAPI:
                     "data": None
                 })
         return results
+
+    def get_all_jobs(
+        self,
+        limit: int = 25,
+        offset: int = 0,
+        stop_at_id: Optional[int] = None,
+    ) -> tuple[list[dict], bool]:
+        """
+        Fetch all jobs sorted by createdAt descending.
+
+        Args:
+            limit: Page size (default 25)
+            offset: Starting offset for pagination
+            stop_at_id: If set, stop fetching when this job ID is found (for incremental refresh)
+
+        Returns:
+            (list_of_raw_jobs, has_more) — raw API entries, and whether more pages exist
+        """
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "sort": "-createdAt",
+        }
+
+        url = f"{self.base_url}/jobLibrary?{urlencode(params)}"
+
+        try:
+            response = self.session.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            data = response.json()
+        except requests.exceptions.Timeout:
+            raise PlatformAPIError(f"Timed out after {self.timeout}s fetching all jobs")
+        except requests.exceptions.ConnectionError:
+            raise PlatformAPIError(f"Cannot connect to {self.base_url}")
+        except requests.exceptions.RequestException as e:
+            raise PlatformAPIError(f"Failed to fetch jobs: {e}")
+
+        raw_jobs = data.get("data", [])
+
+        # Determine if there are more pages
+        has_more = len(raw_jobs) == limit
+
+        # If we have a stop_at_id, trim the results
+        if stop_at_id is not None:
+            trimmed = []
+            for j in raw_jobs:
+                if j.get("id") == stop_at_id:
+                    return trimmed, False  # We've caught up
+                trimmed.append(j)
+            return trimmed, has_more
+
+        return raw_jobs, has_more
