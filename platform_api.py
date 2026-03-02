@@ -16,7 +16,7 @@ class PlatformAPIError(Exception):
 class PlatformAPI:
     """Client for interacting with the Alteryx Cloud Platform Job Library API."""
     
-    def __init__(self, token: Optional[str] = None, base_url: Optional[str] = None, verify_ssl: bool = True, timeout: int = 10):
+    def __init__(self, token: Optional[str] = None, base_url: Optional[str] = None, verify_ssl: bool = True, timeout: int = 120):
         """
         Initialize the Platform API client.
         
@@ -24,7 +24,7 @@ class PlatformAPI:
             token: API bearer token (uses Config if not provided)
             base_url: API base URL (uses Config if not provided)
             verify_ssl: Whether to verify SSL certificates (disable for on-prem with self-signed certs)
-            timeout: Request timeout in seconds (default 10)
+            timeout: Request timeout in seconds (default 120)
         """
         self.token = token or Config.PLATFORM_API_TOKEN
         self.base_url = base_url or Config.PLATFORM_API_BASE_URL
@@ -58,8 +58,9 @@ class PlatformAPI:
         """
         params = {
             "limit": limit or Config.DEFAULT_LIMIT,
-            "filter": flow_name,
-            "ranfor": ranfor or Config.RANFOR_FILTER
+            "filter": f'"{flow_name}"',
+            "ranfor": ranfor or Config.RANFOR_FILTER,
+            "sort": "-createdAt"
         }
         
         url = f"{self.base_url}/jobLibrary?{urlencode(params)}"

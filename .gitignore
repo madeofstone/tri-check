@@ -1,7 +1,15 @@
 # ---- Runtime data (user-specific, generated at runtime) ----
 flows/
 jobs/
+<<<<<<< HEAD
 tri-tracker.db
+=======
+*.db
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+>>>>>>> 98af40d (removed sqlite files)
 
 # ---- Environment & secrets ---------------------------------
 .env
