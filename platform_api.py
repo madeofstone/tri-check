@@ -58,7 +58,7 @@ class PlatformAPI:
         """
         params = {
             "limit": limit or Config.DEFAULT_LIMIT,
-            "filter": f'"{flow_name}"',
+            "filter": flow_name,
             "ranfor": ranfor or Config.RANFOR_FILTER,
             "sort": "-createdAt"
         }
