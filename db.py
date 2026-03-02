@@ -124,6 +124,9 @@ def upsert_jobs(jobs: list[dict], source: str = "aacp"):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     status = excluded.status,
+                    ran_for = excluded.ran_for,
+                    ran_from = excluded.ran_from,
+                    creator_email = excluded.creator_email,
                     updated_at = excluded.updated_at,
                     execution_time_min = excluded.execution_time_min,
                     fetched_at = excluded.fetched_at
@@ -179,6 +182,9 @@ def get_jobs(
         if filters.get("ran_for"):
             where_clauses.append("LOWER(ran_for) = LOWER(?)")
             params.append(filters["ran_for"])
+        if filters.get("days"):
+            where_clauses.append("created_at >= datetime('now', ?)")
+            params.append(f"-{filters['days']} days")
         if filters.get("search"):
             search = f"%{filters['search']}%"
             where_clauses.append(
@@ -218,7 +224,8 @@ def get_jobs_grouped_by_flow(
 ) -> list[dict]:
     """
     Return jobs grouped by flow_id with aggregate stats.
-    Each group has: flow_id, flow_name, job_count, min_exec, max_exec, latest_created_at, jobs[]
+    Each group has: flow_id, flow_name, job_count, min_exec, max_exec, avg_exec,
+    earliest_created_at, latest_created_at, status_counts, ran_from_counts, creators, jobs[]
     """
     where_clauses = ["source = ?"]
     params: list[Any] = [source]
@@ -233,6 +240,9 @@ def get_jobs_grouped_by_flow(
         if filters.get("creator_email"):
             where_clauses.append("creator_email LIKE ?")
             params.append(f"%{filters['creator_email']}%")
+        if filters.get("days"):
+            where_clauses.append("created_at >= datetime('now', ?)")
+            params.append(f"-{filters['days']} days")
 
     where = " AND ".join(where_clauses)
 
@@ -242,6 +252,8 @@ def get_jobs_grouped_by_flow(
                    COUNT(*) as job_count,
                    MIN(execution_time_min) as min_exec,
                    MAX(execution_time_min) as max_exec,
+                   ROUND(AVG(execution_time_min), 1) as avg_exec,
+                   MIN(created_at) as earliest_created_at,
                    MAX(created_at) as latest_created_at
             FROM jobs
             WHERE {where} AND flow_id IS NOT NULL
@@ -256,43 +268,102 @@ def get_jobs_grouped_by_flow(
                 params + [g["flow_id"]],
             ).fetchall()
 
+            jobs_list = [dict(j) for j in jobs]
+
+            # Compute status counts
+            status_counts = {}
+            for j in jobs_list:
+                s = j.get("status", "Unknown")
+                status_counts[s] = status_counts.get(s, 0) + 1
+
+            # Compute ran_from counts
+            ran_from_counts = {}
+            for j in jobs_list:
+                rf = j.get("ran_from") or "Unknown"
+                ran_from_counts[rf] = ran_from_counts.get(rf, 0) + 1
+
+            # Compute ran_for counts
+            ran_for_counts = {}
+            for j in jobs_list:
+                rfr = j.get("ran_for") or "Unknown"
+                ran_for_counts[rfr] = ran_for_counts.get(rfr, 0) + 1
+
+            # Distinct creators
+            creators = list({j.get("creator_email", "") for j in jobs_list if j.get("creator_email")})
+
             result.append({
                 "flow_id": g["flow_id"],
                 "flow_name": g["flow_name"],
                 "job_count": g["job_count"],
                 "min_exec": g["min_exec"],
                 "max_exec": g["max_exec"],
+                "avg_exec": g["avg_exec"],
+                "earliest_created_at": g["earliest_created_at"],
                 "latest_created_at": g["latest_created_at"],
-                "jobs": [dict(j) for j in jobs],
+                "status_counts": status_counts,
+                "ran_from_counts": ran_from_counts,
+                "ran_for_counts": ran_for_counts,
+                "creators": creators,
+                "jobs": jobs_list,
             })
 
     return result
 
 
-def get_kpi_stats(source: str = "aacp") -> dict:
-    """Compute KPI stats: total jobs, success rate, jobs per day (last 7 days)."""
+def get_kpi_stats(source: str = "aacp", days: int = 30) -> dict:
+    """Compute KPI stats: total jobs, success rate, jobs per day in the given window."""
     with get_db() as conn:
         total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM jobs WHERE source = ?", (source,)
+            "SELECT COUNT(*) as cnt FROM jobs WHERE source = ? AND created_at >= datetime('now', ?)",
+            (source, f"-{days} days")
         ).fetchone()["cnt"]
 
         completed = conn.execute(
-            "SELECT COUNT(*) as cnt FROM jobs WHERE source = ? AND LOWER(status) IN ('complete', 'completed')",
-            (source,),
+            "SELECT COUNT(*) as cnt FROM jobs WHERE source = ? AND LOWER(status) IN ('complete', 'completed') AND created_at >= datetime('now', ?)",
+            (source, f"-{days} days"),
         ).fetchone()["cnt"]
-
-        # Jobs per day over last 7 days
-        recent = conn.execute("""
-            SELECT COUNT(*) as cnt FROM jobs
-            WHERE source = ? AND created_at >= datetime('now', '-7 days')
-        """, (source,)).fetchone()["cnt"]
 
     return {
         "total_jobs": total,
         "completed_jobs": completed,
         "success_rate": round(completed / total * 100, 1) if total > 0 else 0,
-        "jobs_per_day_7d": round(recent / 7, 1),
+        "jobs_per_day": round(total / days, 1),
     }
+
+
+def get_daily_job_counts(
+    source: str = "aacp",
+    days: int = 30,
+    status_filter: str = "",
+) -> list[dict]:
+    """Return daily job counts broken down by success/failure for the last N days.
+
+    Each element: {date: "YYYY-MM-DD", success: int, failed: int, other: int}
+    If status_filter is set, only that status is counted (still split into the
+    appropriate bucket so the chart keeps its colour semantics).
+    """
+    where_clauses = ["source = ?", "created_at >= datetime('now', ?)"]
+    params: list = [source, f"-{days} days"]
+
+    if status_filter:
+        where_clauses.append("LOWER(status) = LOWER(?)")
+        params.append(status_filter)
+
+    where = " AND ".join(where_clauses)
+
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT DATE(created_at) as day,
+                   SUM(CASE WHEN LOWER(status) IN ('complete','completed') THEN 1 ELSE 0 END) as success,
+                   SUM(CASE WHEN LOWER(status) = 'failed' THEN 1 ELSE 0 END) as failed,
+                   SUM(CASE WHEN LOWER(status) NOT IN ('complete','completed','failed') THEN 1 ELSE 0 END) as other
+            FROM jobs
+            WHERE {where}
+            GROUP BY DATE(created_at)
+            ORDER BY day ASC
+        """, params).fetchall()
+
+    return [{"date": r["day"], "success": r["success"], "failed": r["failed"], "other": r["other"]} for r in rows]
 
 
 # ---------------------------------------------------------------------------

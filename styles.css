@@ -76,31 +76,29 @@ body {
 .icon-btn-sm { width: 28px; height: 28px; }
 .icon-btn-sm svg { width: 16px; height: 16px; }
 
-/* --- Tab Bar ----------------------------------------------- */
-.tab-bar {
-    position: fixed; top: var(--topbar-h); left: 0; right: 0;
-    z-index: 99;
-    display: flex; gap: 0;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-subtle);
-    padding: 0 24px;
-    height: 40px;
+/* --- Topbar Tabs (inline in header) ----------------------- */
+.topbar-tabs {
+    display: flex; align-items: center; gap: 2px;
+    margin-left: 24px;
+    padding-left: 24px;
+    border-left: 1px solid var(--border-subtle);
+    height: 100%;
 }
-.tab-btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 0 18px; height: 100%;
+.topbar-tab {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 0 14px; height: 100%;
     background: none; border: none; border-bottom: 2px solid transparent;
-    color: var(--text-muted); font-size: 0.82rem; font-weight: 600;
+    color: var(--text-muted); font-size: 0.8rem; font-weight: 600;
     cursor: pointer; transition: var(--transition);
     white-space: nowrap;
 }
-.tab-btn:hover { color: var(--text-primary); }
-.tab-btn.active {
+.topbar-tab:hover { color: var(--text-primary); }
+.topbar-tab.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
 }
-.tab-btn svg { opacity: 0.7; }
-.tab-btn.active svg { opacity: 1; }
+.topbar-tab svg { opacity: 0.6; }
+.topbar-tab.active svg { opacity: 1; }
 
 /* --- Tab Panels -------------------------------------------- */
 .tab-panel { display: flex; width: 100%; }
@@ -109,8 +107,8 @@ body {
 /* --- App Layout -------------------------------------------- */
 .app-layout {
     display: flex;
-    margin-top: calc(var(--topbar-h) + 40px);
-    height: calc(100vh - var(--topbar-h) - 40px);
+    margin-top: var(--topbar-h);
+    height: calc(100vh - var(--topbar-h));
 }
 
 /* --- Sidebar ----------------------------------------------- */
@@ -607,26 +605,54 @@ body {
    All Jobs Tab Styles
    ============================================================ */
 
-/* --- KPI Strip --------------------------------------------- */
-.aj-kpi-strip {
-    display: flex; gap: 14px;
+/* --- KPI Row (cards + daily chart) ----------------------------- */
+.aj-kpi-row {
+    display: flex; gap: 18px;
     margin-bottom: 20px;
+    align-items: stretch;
+    height: 100px; /* ~15% shorter than previous aspect-ratio height ~120px */
+}
+.aj-kpi-cards {
+    display: flex; flex-direction: row; gap: 12px;
+    flex-shrink: 0;
 }
 .aj-kpi {
-    display: flex; flex-direction: column; gap: 2px;
-    padding: 12px 18px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 16px;
     border-radius: var(--radius-sm);
     background: var(--bg-card);
     border: 1px solid var(--border-subtle);
     min-width: 120px;
 }
 .aj-kpi-value {
-    font-size: 1.5rem; font-weight: 700; color: var(--accent);
-    line-height: 1.2;
+    font-size: 1.6rem; font-weight: 700; color: var(--accent);
+    line-height: 1;
 }
 .aj-kpi-label {
     font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.06em; color: var(--text-muted);
+    text-align: center;
+}
+.aj-daily-chart-wrap {
+    flex: 1; min-width: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    display: flex; flex-direction: column; gap: 10px;
+}
+.aj-chart-header {
+    display: flex; justify-content: space-between; align-items: center;
+}
+.aj-chart-title {
+    font-size: 0.75rem; font-weight: 600; text-transform: uppercase; 
+    letter-spacing: 0.05em; color: var(--text-muted);
+}
+.aj-chart-controls {
+    display: flex; gap: 8px; align-items: center;
+}
+.aj-chart-body {
+    flex: 1; min-height: 0; position: relative;
 }
 
 /* --- Toolbar ----------------------------------------------- */
@@ -654,17 +680,79 @@ body {
     box-shadow: 0 0 0 2px rgba(108,122,255,0.15);
 }
 .aj-filter-select {
-    padding: 7px 10px; border: 1px solid var(--border-medium);
-    border-radius: var(--radius-sm); background: var(--bg-card);
-    color: var(--text-primary); font-size: 0.82rem;
+    width: 100%; padding: 8px 10px;
+    border: 1px solid var(--border-medium); border-radius: var(--radius-sm);
+    background: var(--bg-card); color: var(--text-primary);
+    font-size: 0.82rem; cursor: pointer;
+}
+
+/* --- All Jobs Sidebar Body --------------------------------- */
+.aj-sidebar-body {
+    padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 16px;
+}
+
+/* --- Sidebar Filter Sections ------------------------------- */
+.aj-filter-label {
+    display: block;
+    font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+/* --- Group-by-Flow Toggle ---------------------------------- */
+.aj-filter-group-toggle {
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.aj-toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; cursor: pointer;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    transition: var(--transition);
+}
+.aj-toggle-row:hover {
+    border-color: var(--border-medium);
+}
+.aj-toggle-info { display: flex; flex-direction: column; gap: 2px; }
+.aj-toggle-title {
+    font-size: 0.82rem; font-weight: 600; color: var(--text-primary);
+}
+.aj-toggle-desc {
+    font-size: 0.68rem; color: var(--text-muted);
+}
+
+/* iOS-style toggle switch */
+.aj-toggle-switch {
+    position: relative; display: inline-block;
+    width: 40px; height: 22px; flex-shrink: 0;
+}
+.aj-toggle-switch input { opacity: 0; width: 0; height: 0; }
+.aj-toggle-slider {
+    position: absolute; inset: 0;
+    background: var(--border-medium);
+    border-radius: 22px;
     cursor: pointer;
+    transition: background 0.25s;
 }
-.aj-group-label {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 0.82rem; color: var(--text-secondary);
-    cursor: pointer; white-space: nowrap;
+.aj-toggle-slider::before {
+    content: "";
+    position: absolute; left: 2px; top: 2px;
+    width: 18px; height: 18px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.25s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
 }
-.aj-group-label input { cursor: pointer; }
+.aj-toggle-switch input:checked + .aj-toggle-slider {
+    background: var(--accent);
+}
+.aj-toggle-switch input:checked + .aj-toggle-slider::before {
+    transform: translateX(18px);
+}
 
 /* --- Table Overrides --------------------------------------- */
 .aj-table-wrap {
@@ -673,6 +761,7 @@ body {
 .aj-table th { white-space: nowrap; }
 
 /* --- Group Rows -------------------------------------------- */
+.aj-group-toggle-col { width: 28px; }
 .aj-group-header {
     cursor: pointer;
     transition: background 0.15s;
@@ -681,13 +770,45 @@ body {
     background: var(--bg-elevated) !important;
 }
 .aj-group-toggle {
-    width: 24px; text-align: center;
+    width: 28px; text-align: center;
     font-size: 0.9rem; color: var(--text-muted);
 }
 .aj-group-child {
     background: rgba(108,122,255,0.03);
+    border-left: 3px solid var(--accent);
 }
-.aj-group-child td { padding-left: 12px; }
+.aj-group-child td:first-child { width: 28px; }
+
+/* Count badges (next to status icons and ran-from tags) */
+.aj-count-badge {
+    display: inline-block;
+    font-size: 0.68rem; font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+/* Ran-from tags in grouped header */
+.aj-ran-tag {
+    display: inline-flex; align-items: center; gap: 2px;
+    font-size: 0.78rem; color: var(--text-secondary);
+    margin-right: 4px;
+}
+
+/* Status cell in grouped header (prevent wrapping) */
+.aj-status-cell { white-space: nowrap; }
+.aj-ranfrom-cell { white-space: nowrap; }
+
+/* Creators cell — truncate if too long */
+.aj-creators-cell {
+    max-width: 160px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Exec range (min – max – avg) */
+.aj-exec-range {
+    white-space: nowrap; font-variant-numeric: tabular-nums;
+}
 
 /* --- Load More --------------------------------------------- */
 .aj-load-more {

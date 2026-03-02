@@ -14,6 +14,31 @@ let _dashAnalysis = null;
 // Cached tuning rules (loaded once from tuning_rules.json)
 let _tuningRules = null;
 
+// Track which tab opened the dashboard so we can close to the right place
+let _dashOrigin = null; // { slider, panel, main }
+
+// ---------------------------------------------------------------------------
+// Helpers — find the correct slider elements for the active tab
+// ---------------------------------------------------------------------------
+
+function _getDashElements() {
+    // Check which tab is active
+    const ajTab = document.getElementById("tabAllJobs");
+    if (ajTab && ajTab.classList.contains("active")) {
+        return {
+            slider: document.getElementById("ajViewSlider"),
+            panel: document.getElementById("ajDashboardPanel"),
+            main: document.getElementById("allJobsContent"),
+        };
+    }
+    // Default: Flow Analysis tab
+    return {
+        slider: document.getElementById("viewSlider"),
+        panel: document.getElementById("dashboardPanel"),
+        main: document.getElementById("mainContent"),
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -24,14 +49,13 @@ let _tuningRules = null;
  * @param {string} jobRunId — for display
  */
 async function openDashboard(analysis, jobRunId) {
-    const slider = document.getElementById("viewSlider");
-    const panel = document.getElementById("dashboardPanel");
-    const main = document.getElementById("mainContent");
-    if (!slider || !panel) return;
+    const els = _getDashElements();
+    if (!els.slider || !els.panel) return;
 
+    _dashOrigin = els;
     _dashActive = true;
     _dashAnalysis = analysis;
-    main.classList.add("slider-active");
+    els.main.classList.add("slider-active");
 
     // Load tuning rules once
     if (!_tuningRules) {
@@ -45,10 +69,10 @@ async function openDashboard(analysis, jobRunId) {
     }
 
     // Build dashboard HTML
-    panel.innerHTML = buildDashboardHTML(analysis, jobRunId);
+    els.panel.innerHTML = buildDashboardHTML(analysis, jobRunId);
 
     // Slide to dashboard
-    slider.classList.add("slide-dashboard");
+    els.slider.classList.add("slide-dashboard");
 
     // Render charts after transition settles
     requestAnimationFrame(() => {
@@ -70,19 +94,19 @@ async function openDashboard(analysis, jobRunId) {
  * Slide back to main view.
  */
 function closeDashboard() {
-    const slider = document.getElementById("viewSlider");
-    const main = document.getElementById("mainContent");
-    if (!slider) return;
+    const els = _dashOrigin || _getDashElements();
+    if (!els.slider) return;
 
-    slider.classList.remove("slide-dashboard");
+    els.slider.classList.remove("slide-dashboard");
     _dashActive = false;
     _dashAnalysis = null;
 
     // Destroy charts after transition
     setTimeout(() => {
-        main.classList.remove("slider-active");
+        els.main.classList.remove("slider-active");
         _dashCharts.forEach(c => c.destroy());
         _dashCharts = [];
+        _dashOrigin = null;
     }, 500);
 }
 
@@ -428,12 +452,14 @@ function renderExecutorTimeline(analysis) {
                     label: "Pending Tasks",
                     data: pendingPoints,
                     borderColor: "#f59e0b",
-                    backgroundColor: "rgba(245, 158, 11, 0.08)",
+                    backgroundColor: "rgba(245, 158, 11, 0.06)",
                     fill: true,
                     stepped: false,
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    tension: 0.3,
+                    borderWidth: 1.5,
+                    pointRadius: 1,
+                    pointHoverRadius: 4,
+                    pointBackgroundColor: "#f59e0b",
+                    tension: 0,
                     yAxisID: "y1",
                 },
             ],

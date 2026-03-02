@@ -19,11 +19,18 @@ let _ajHasDbMore = true; // more rows in DB
 // ---------------------------------------------------------------------------
 
 function switchTab(tab) {
-    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelector(`[data-tab="${tab}"]`)?.classList.add("active");
+    // Update tab button active state
+    document.querySelectorAll(".topbar-tab").forEach(b => b.classList.remove("active"));
+    document.querySelector(`.topbar-tab[data-tab="${tab}"]`)?.classList.add("active");
 
-    document.getElementById("tabAllJobs").style.display = tab === "allJobs" ? "" : "none";
-    document.getElementById("tabFlowAnalysis").style.display = tab === "flowAnalysis" ? "" : "none";
+    // Toggle panel visibility via class (CSS handles display)
+    const allJobsPanel = document.getElementById("tabAllJobs");
+    const flowPanel = document.getElementById("tabFlowAnalysis");
+
+    allJobsPanel.classList.toggle("active", tab === "allJobs");
+    allJobsPanel.style.display = "";  // clear any inline style
+    flowPanel.classList.toggle("active", tab === "flowAnalysis");
+    flowPanel.style.display = "";     // clear any inline style
 
     if (tab === "allJobs") {
         ajLoadKpis();
@@ -65,6 +72,40 @@ async function ajFetchJobs(refresh = true) {
         error.style.display = "";
     } finally {
         btn.disabled = false;
+        loading.style.display = "none";
+    }
+}
+
+async function ajRefreshJobs() {
+    const btn = document.getElementById("ajRefreshBtn");
+    const fetchBtn = document.getElementById("ajFetchBtn");
+    const loading = document.getElementById("ajLoading");
+    const error = document.getElementById("ajError");
+
+    btn.disabled = true;
+    fetchBtn.disabled = true;
+    btn.textContent = "Refreshing…";
+    loading.style.display = "";
+    error.style.display = "none";
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/all-jobs/refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+        });
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        // Reload table + KPIs with fresh data
+        await ajQueryJobs();
+        await ajLoadKpis();
+    } catch (e) {
+        error.textContent = `⚠ ${e.message}`;
+        error.style.display = "";
+    } finally {
+        btn.disabled = false;
+        fetchBtn.disabled = false;
+        btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg> Refresh`;
         loading.style.display = "none";
     }
 }
@@ -176,20 +217,149 @@ async function ajLoadMore() {
 }
 
 // ---------------------------------------------------------------------------
-// KPIs
+// KPIs + Daily Chart
 // ---------------------------------------------------------------------------
 
 async function ajLoadKpis() {
     try {
-        const resp = await fetch(`${API_BASE}/api/all-jobs/kpis`);
+        const filters = _ajBuildFilterParams();
+        const resp = await fetch(`${API_BASE}/api/all-jobs/kpis?${filters}`);
         const data = await resp.json();
         document.getElementById("ajKpiTotal").textContent = data.total_jobs ?? "—";
         document.getElementById("ajKpiRate").textContent =
             data.success_rate != null ? `${data.success_rate}%` : "—";
+        
+        const days = document.getElementById("ajDaysFilter")?.value || 30;
         document.getElementById("ajKpiDaily").textContent =
-            data.jobs_per_day_7d != null ? data.jobs_per_day_7d : "—";
+            data.jobs_per_day != null ? data.jobs_per_day : "—";
+        document.getElementById("ajKpiDaily").nextElementSibling.textContent = `Jobs / Day (${days}d)`;
     } catch (e) {
         // Silently fail — KPIs are non-critical
+    }
+    // Also refresh the daily chart
+    ajLoadDailyChart();
+}
+
+let _ajDailyChartInstance = null;
+
+async function ajLoadDailyChart() {
+    const filters = _ajBuildFilterParams();
+    try {
+        const resp = await fetch(`${API_BASE}/api/all-jobs/daily-chart?${filters}`);
+        const data = await resp.json();
+        const days = data.days || [];
+
+        const labels = days.map(d => {
+            // Format as "Mon DD" for readability
+            const dt = new Date(d.date + "T00:00:00");
+            return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        });
+        const successData = days.map(d => d.success);
+        const failedData = days.map(d => d.failed);
+        const otherData = days.map(d => d.other);
+
+        const canvas = document.getElementById("ajDailyChart");
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+
+        // Destroy previous instance to avoid canvas reuse errors
+        if (_ajDailyChartInstance) {
+            _ajDailyChartInstance.destroy();
+            _ajDailyChartInstance = null;
+        }
+
+        _ajDailyChartInstance = new Chart(ctx, {
+            type: "bar",
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: "Successful",
+                        data: successData,
+                        backgroundColor: "rgba(52, 211, 153, 0.75)",
+                        borderColor: "rgba(52, 211, 153, 1)",
+                        borderWidth: 1,
+                        borderRadius: 2,
+                    },
+                    {
+                        label: "Failed",
+                        data: failedData,
+                        backgroundColor: "rgba(248, 113, 113, 0.75)",
+                        borderColor: "rgba(248, 113, 113, 1)",
+                        borderWidth: 1,
+                        borderRadius: 2,
+                    },
+                    {
+                        label: "Other",
+                        data: otherData,
+                        backgroundColor: "rgba(251, 191, 36, 0.55)",
+                        borderColor: "rgba(251, 191, 36, 1)",
+                        borderWidth: 1,
+                        borderRadius: 2,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false, // Hidden per user request
+                    },
+                    tooltip: {
+                        backgroundColor: "#232738",
+                        titleColor: "#e8eaf0",
+                        bodyColor: "#9498ab",
+                        borderColor: "rgba(255,255,255,0.1)",
+                        borderWidth: 1,
+                        padding: 10,
+                        cornerRadius: 6,
+                        titleFont: { family: "Inter", weight: "600" },
+                        bodyFont: { family: "Inter" },
+                        callbacks: {
+                            title: (items) => {
+                                if (!items.length) return "";
+                                const idx = items[0].dataIndex;
+                                return days[idx]?.date || items[0].label;
+                            },
+                            afterBody: (items) => {
+                                if (!items.length) return "";
+                                const idx = items[0].dataIndex;
+                                const total = (days[idx]?.success || 0) + (days[idx]?.failed || 0) + (days[idx]?.other || 0);
+                                return `Total: ${total}`;
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        stacked: true,
+                        grid: { display: false },
+                        ticks: {
+                            color: "#5d6177",
+                            font: { size: 9, family: "Inter" },
+                            maxRotation: 45,
+                            autoSkip: true,
+                            maxTicksLimit: 15,
+                        },
+                        border: { color: "rgba(255,255,255,0.06)" },
+                    },
+                    y: {
+                        stacked: true,
+                        beginAtZero: true,
+                        grid: { color: "rgba(255,255,255,0.04)" },
+                        ticks: {
+                            color: "#5d6177",
+                            font: { size: 10, family: "Inter" },
+                            precision: 0,
+                        },
+                        border: { display: false },
+                    },
+                },
+            },
+        });
+    } catch (e) {
+        // Silently fail — chart is non-critical
     }
 }
 
@@ -201,9 +371,11 @@ function _ajBuildFilterParams() {
     const params = new URLSearchParams();
     const search = document.getElementById("ajSearch")?.value?.trim();
     const status = document.getElementById("ajStatusFilter")?.value;
+    const days = document.getElementById("ajDaysFilter")?.value;
 
     if (search) params.set("search", search);
     if (status) params.set("status", status);
+    if (days) params.set("days", days);
 
     return params.toString();
 }
@@ -211,7 +383,11 @@ function _ajBuildFilterParams() {
 let _ajFilterTimer = null;
 function ajApplyFilters() {
     clearTimeout(_ajFilterTimer);
-    _ajFilterTimer = setTimeout(() => ajQueryJobs(), 300);
+    _ajFilterTimer = setTimeout(() => {
+        ajLoadKpis();
+        ajQueryJobs();
+        ajLoadDailyChart();
+    }, 300);
 }
 
 function ajToggleGroup() {
@@ -233,6 +409,7 @@ function _ajRenderFlat(jobs) {
         <th>Flow Name</th>
         <th>Flow ID</th>
         <th>Ran From</th>
+        <th>Ran For</th>
         <th>Creator</th>
         <th>Started</th>
         <th>Exec (min)</th>
@@ -250,6 +427,7 @@ function _ajRenderFlat(jobs) {
             <td>${esc(j.flow_name || "—")}</td>
             <td>${j.flow_id || "—"}</td>
             <td>${esc(j.ran_from || "—")}</td>
+            <td>${esc(j.ran_for || "—")}</td>
             <td>${esc(j.creator_email || "—")}</td>
             <td>${formatDateTime(j.created_at)}</td>
             <td>${j.execution_time_min != null ? j.execution_time_min.toFixed(1) : "—"}</td>
@@ -266,30 +444,64 @@ function _ajRenderGrouped(groups) {
     const head = document.getElementById("ajTableHead");
     const body = document.getElementById("ajTableBody");
 
+    // Same headers as flat view, but "Job ID" becomes "Jobs"
     head.innerHTML = `<tr>
-        <th></th>
+        <th class="aj-group-toggle-col"></th>
+        <th>Jobs</th>
+        <th>Status</th>
         <th>Flow Name</th>
         <th>Flow ID</th>
-        <th>Jobs</th>
-        <th>Min Exec (min)</th>
-        <th>Max Exec (min)</th>
-        <th>Latest Run</th>
+        <th>Ran From</th>
+        <th>Ran For</th>
+        <th>Creator</th>
+        <th>Started</th>
+        <th>Exec (min)</th>
+        <th class="dbx-col-header">DBX</th>
     </tr>`;
 
     let html = "";
     for (const g of groups) {
         const gid = `aj-group-${g.flow_id}`;
+
+        // Status badges with counts
+        const statusHtml = Object.entries(g.status_counts || {})
+            .map(([s, n]) => `${statusBadge(s)}<span class="aj-count-badge">${n}</span>`)
+            .join(" ");
+
+        // Ran From with counts
+        const ranFromHtml = Object.entries(g.ran_from_counts || {})
+            .map(([rf, n]) => `<span class="aj-ran-tag">${esc(rf)} <span class="aj-count-badge">${n}</span></span>`)
+            .join(" ");
+
+        // Ran For with counts
+        const ranForHtml = Object.entries(g.ran_for_counts || {})
+            .map(([rf, n]) => `<span class="aj-ran-tag">${esc(rf)} <span class="aj-count-badge">${n}</span></span>`)
+            .join(" ");
+
+        // Creators concatenated
+        const creatorsHtml = (g.creators || []).map(c => esc(c)).join(", ") || "—";
+
+        // Exec: min – max – avg
+        const minE = g.min_exec != null ? g.min_exec.toFixed(1) : "—";
+        const maxE = g.max_exec != null ? g.max_exec.toFixed(1) : "—";
+        const avgE = g.avg_exec != null ? g.avg_exec.toFixed(1) : "—";
+        const execHtml = g.min_exec != null ? `${minE} – ${maxE} – ${avgE}` : "—";
+
         html += `<tr class="aj-group-header" onclick="ajToggleGroupRow('${gid}')">
             <td class="aj-group-toggle">▸</td>
+            <td><strong>${g.job_count}</strong></td>
+            <td class="aj-status-cell">${statusHtml}</td>
             <td><strong>${esc(g.flow_name || "—")}</strong></td>
             <td>${g.flow_id || "—"}</td>
-            <td>${g.job_count}</td>
-            <td>${g.min_exec != null ? g.min_exec.toFixed(1) : "—"}</td>
-            <td>${g.max_exec != null ? g.max_exec.toFixed(1) : "—"}</td>
-            <td>${formatDateTime(g.latest_created_at)}</td>
+            <td class="aj-ranfrom-cell">${ranFromHtml}</td>
+            <td class="aj-ranfrom-cell">${ranForHtml}</td>
+            <td class="aj-creators-cell" title="${esc(creatorsHtml)}">${creatorsHtml}</td>
+            <td>${formatDateTime(g.earliest_created_at)}</td>
+            <td class="aj-exec-range">${execHtml}</td>
+            <td></td>
         </tr>`;
 
-        // Nested rows (hidden by default)
+        // Expanded child rows — same columns as flat view
         for (const j of g.jobs) {
             const dbxBtn = j.databricks_job_id
                 ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
@@ -297,10 +509,15 @@ function _ajRenderGrouped(groups) {
 
             html += `<tr class="aj-group-child ${gid}" style="display:none">
                 <td></td>
-                <td colspan="2">Job ${j.job_id} — ${statusBadge(j.status)}</td>
+                <td><strong>${j.job_id}</strong></td>
+                <td>${statusBadge(j.status)}</td>
+                <td>${esc(j.flow_name || "—")}</td>
+                <td>${j.flow_id || "—"}</td>
+                <td>${esc(j.ran_from || "—")}</td>
+                <td>${esc(j.ran_for || "—")}</td>
                 <td>${esc(j.creator_email || "—")}</td>
-                <td>${j.execution_time_min != null ? j.execution_time_min.toFixed(1) : "—"}</td>
                 <td>${formatDateTime(j.created_at)}</td>
+                <td>${j.execution_time_min != null ? j.execution_time_min.toFixed(1) : "—"}</td>
                 <td class="dbx-cell">${dbxBtn}</td>
             </tr>`;
         }
@@ -340,7 +557,7 @@ async function ajToggleDbx(btn) {
 
     const dbxId = btn.dataset.dbxid;
     const jobId = btn.dataset.jobid;
-    const totalCols = 9;
+    const totalCols = 10;
 
     const detailRow = document.createElement("tr");
     detailRow.className = "dbx-detail-row";
@@ -357,6 +574,18 @@ async function ajToggleDbx(btn) {
         if (data.error) throw new Error(data.error);
         data._jobRunId = jobId;
         data._flowName = "";
+
+        // Check if analysis already exists for this job
+        try {
+            const analysisResp = await fetch(`${API_BASE}/api/eventlog/${encodeURIComponent(jobId)}`);
+            if (analysisResp.ok) {
+                const analysisData = await analysisResp.json();
+                if (analysisData.analysis && !analysisData.error) {
+                    data._isAnalyzed = true;
+                }
+            }
+        } catch (_) { /* ignore — just means no analysis yet */ }
+
         detailRow.querySelector(".dbx-detail-cell").innerHTML = renderDbxPanel(data);
     } catch (e) {
         detailRow.querySelector(".dbx-detail-cell").innerHTML = `<div class="dbx-error">⚠ ${esc(e.message)}</div>`;

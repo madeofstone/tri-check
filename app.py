@@ -167,16 +167,18 @@ def extract_job_summary(job_data: dict) -> dict:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-    # Extract ranFor and creator email
-    ran_for = job_data.get("ranFor", "")
-    ran_from = ""
+    # Extract ranfor, ranfrom, and creator email (API uses lowercase keys)
+    ran_for = job_data.get("ranfor", "")
+    ran_from = job_data.get("ranfrom", "")
     creator_email = ""
-    creator = job_data.get("creator")
-    if creator:
-        creator_email = creator.get("email", "")
-    activator = job_data.get("activator")
-    if activator:
-        ran_from = activator.get("name", activator.get("type", ""))
+    # creator email may be in updater or creator object
+    updater = job_data.get("updater")
+    if updater and isinstance(updater, dict):
+        creator_email = updater.get("email", "")
+    if not creator_email:
+        creator = job_data.get("creator")
+        if creator and isinstance(creator, dict):
+            creator_email = creator.get("email", "")
 
     return {
         "jobRunId": job_data.get("id"),
@@ -437,11 +439,9 @@ def fetch_eventlog():
     if not Config.DATABRICKS_HOST or not Config.DATABRICKS_TOKEN:
         return jsonify({"error": "DATABRICKS_HOST and DATABRICKS_TOKEN must be configured"}), 400
 
-    # Determine storage directory
-    if flow_name:
-        job_dir = Path(flow_store.eventlog_dir(flow_name, str(job_run_id)))
-    else:
-        job_dir = LEGACY_JOBS_DIR / str(job_run_id)
+    # Always store in jobs/<jobRunId>/ directory
+    job_dir = LEGACY_JOBS_DIR / str(job_run_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
     analysis_file = job_dir / "analysis.json"
 
     # Return cached analysis if it exists
@@ -489,12 +489,25 @@ def fetch_eventlog():
 @app.route("/api/eventlog/<job_run_id>", methods=["GET"])
 def get_eventlog_analysis(job_run_id):
     """Return previously generated analysis.json for a job run."""
-    # Check flow-based storage first
-    flow_name = request.args.get("flowName", "").strip()
-    if flow_name:
-        analysis_file = Path(flow_store.eventlog_dir(flow_name, str(job_run_id))) / "analysis.json"
-    else:
-        analysis_file = LEGACY_JOBS_DIR / str(job_run_id) / "analysis.json"
+    # Primary: check jobs/<id>/
+    analysis_file = LEGACY_JOBS_DIR / str(job_run_id) / "analysis.json"
+
+    # Fallback: check flow-based storage for backwards compatibility
+    if not analysis_file.exists():
+        flow_name = request.args.get("flowName", "").strip()
+        if flow_name:
+            alt = Path(flow_store.eventlog_dir(flow_name, str(job_run_id))) / "analysis.json"
+            if alt.exists():
+                analysis_file = alt
+        # Also scan all flow directories
+        if not analysis_file.exists():
+            flows_dir = Path(__file__).resolve().parent / "flows"
+            if flows_dir.exists():
+                for fd in flows_dir.iterdir():
+                    candidate = fd / "eventlogs" / str(job_run_id) / "analysis.json"
+                    if candidate.exists():
+                        analysis_file = candidate
+                        break
 
     if not analysis_file.exists():
         return jsonify({"error": "No analysis found for this job run", "exists": False}), 404
@@ -636,6 +649,52 @@ def load_more_jobs():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/all-jobs/refresh", methods=["POST"])
+def refresh_all_jobs():
+    """Re-fetch all existing jobs from AACP to update their statuses.
+
+    Counts how many jobs we have in the DB, then pages through
+    that many from the API (in 25-job chunks) and upserts them.
+    DBX cache is untouched — only job columns are updated.
+    """
+    if not Config.PLATFORM_API_TOKEN or not Config.PLATFORM_API_BASE_URL:
+        return jsonify({"error": "PLATFORM_API_BASE_URL and PLATFORM_API_TOKEN must be configured"}), 400
+
+    try:
+        stats = db.get_kpi_stats("aacp")
+        total_in_db = stats.get("total_jobs", 0)
+        if total_in_db == 0:
+            return jsonify({"refreshed": 0, "message": "No jobs to refresh"})
+
+        api = PlatformAPI(
+            token=Config.PLATFORM_API_TOKEN,
+            base_url=Config.PLATFORM_API_BASE_URL,
+        )
+
+        all_jobs = []
+        offset = 0
+        page_size = 25
+
+        while offset < total_in_db:
+            raw_jobs, has_more = api.get_all_jobs(limit=page_size, offset=offset)
+            summaries = [extract_job_summary(j) for j in raw_jobs]
+            all_jobs.extend(summaries)
+            offset += page_size
+
+            if not has_more:
+                break
+
+        db.upsert_jobs(all_jobs, source="aacp")
+
+        return jsonify({
+            "refreshed": len(all_jobs),
+            "totalInDb": total_in_db,
+            "message": f"Refreshed {len(all_jobs)} jobs",
+        })
+    except PlatformAPIError as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/all-jobs", methods=["GET"])
 def query_all_jobs():
     """Query stored jobs with filters and pagination."""
@@ -644,7 +703,7 @@ def query_all_jobs():
     group = request.args.get("group", "", type=str)
 
     filters = {}
-    for key in ("status", "flow_id", "flow_name", "creator_email", "ran_for", "search"):
+    for key in ("status", "flow_id", "flow_name", "creator_email", "ran_for", "search", "days"):
         val = request.args.get(key, "").strip()
         if val:
             filters[key] = val
@@ -666,8 +725,18 @@ def query_all_jobs():
 @app.route("/api/all-jobs/kpis", methods=["GET"])
 def all_jobs_kpis():
     """Return KPI stats for the All Jobs tab."""
-    stats = db.get_kpi_stats("aacp")
+    days = request.args.get("days", 30, type=int)
+    stats = db.get_kpi_stats("aacp", days=days)
     return jsonify(stats)
+
+
+@app.route("/api/all-jobs/daily-chart", methods=["GET"])
+def all_jobs_daily_chart():
+    """Return daily job counts (success/failed/other) for bar chart."""
+    days = request.args.get("days", 30, type=int)
+    status_filter = request.args.get("status", "", type=str).strip()
+    data = db.get_daily_job_counts(source="aacp", days=days, status_filter=status_filter)
+    return jsonify({"days": data})
 
 
 # ---------------------------------------------------------------------------
