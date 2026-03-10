@@ -687,18 +687,15 @@ def extract_executor_task_distribution(events):
     return result
 
 
-def extract_stage_task_bins(events, bin_size=20):
+def extract_stage_task_bins(events, max_stages=5):
     """
-    Build binned task breakdown per stage for the Stage Task Breakdown chart.
-
-    For each stage, sorts successful tasks by duration, chunks into bins,
-    and computes per-bin averages for duration, GC time, and disk spill.
-
+    Extract per-task detailed metrics for the most significant stages.
     Returns:
-        {"longest_stage_id": int, "stages": {stage_id: [bins]}}
+        {"longest_stage_id": int, "stages": {stage_id: [task_metrics]}}
     """
     # Collect successful tasks per stage
-    stage_tasks = {}  # stage_id -> [(duration_ms, gc_ms, spill_bytes)]
+    # stage_id -> [{"task_id": int, "duration_ms": int, "input_bytes": int, "shuffle_read_bytes": int, 'spill_bytes': int}]
+    stage_tasks = {}
 
     for ev in events:
         if ev.get("Event") != "SparkListenerTaskEnd":
@@ -710,56 +707,52 @@ def extract_stage_task_bins(events, bin_size=20):
         stage_id = ev.get("Stage ID")
         task_info = ev.get("Task Info", {})
         task_metrics = ev.get("Task Metrics", {})
+        input_metrics = task_metrics.get("Input Metrics", {})
+        shuffle_read = task_metrics.get("Shuffle Read Metrics", {})
 
         launch = task_info.get("Launch Time", 0)
         finish = task_info.get("Finish Time", 0)
         duration_ms = finish - launch if finish and launch else 0
-        gc_ms = task_metrics.get("JVM GC Time", 0)
+        
+        input_bytes = input_metrics.get("Bytes Read", 0)
+        shuffle_read_bytes = shuffle_read.get("Remote Bytes Read", 0) + shuffle_read.get("Local Bytes Read", 0)
         spill_bytes = task_metrics.get("Disk Bytes Spilled", 0)
 
         if stage_id is not None:
             if stage_id not in stage_tasks:
                 stage_tasks[stage_id] = []
-            stage_tasks[stage_id].append((duration_ms, gc_ms, spill_bytes))
-
-    # Build bins per stage
-    stages_binned = {}
-    longest_stage_id = None
-    longest_duration_total = 0
-
-    for stage_id in sorted(stage_tasks.keys()):
-        tasks = stage_tasks[stage_id]
-        # Sort by duration
-        tasks.sort(key=lambda t: t[0])
-
-        total_duration = sum(t[0] for t in tasks)
-        if total_duration > longest_duration_total:
-            longest_duration_total = total_duration
-            longest_stage_id = stage_id
-
-        bins = []
-        for i in range(0, len(tasks), bin_size):
-            chunk = tasks[i : i + bin_size]
-            start_idx = i + 1
-            end_idx = i + len(chunk)
-            label = f"P{start_idx}-{end_idx}"
-
-            avg_duration = sum(t[0] for t in chunk) / len(chunk)
-            avg_gc = sum(t[1] for t in chunk) / len(chunk)
-            avg_spill = sum(t[2] for t in chunk) / len(chunk)
-
-            bins.append({
-                "label": label,
-                "avg_duration_ms": round(avg_duration, 1),
-                "avg_gc_ms": round(avg_gc, 1),
-                "avg_spill_bytes": round(avg_spill, 1),
+            
+            stage_tasks[stage_id].append({
+                "task_id": task_info.get("Task ID", len(stage_tasks[stage_id])),
+                "duration_ms": duration_ms,
+                "input_bytes": input_bytes,
+                "shuffle_read_bytes": shuffle_read_bytes,
+                "spill_bytes": spill_bytes
             })
 
-        stages_binned[str(stage_id)] = bins
+    # Find the top stages by total duration
+    stage_totals = []
+    for stage_id, tasks in stage_tasks.items():
+        total_duration = sum(t["duration_ms"] for t in tasks)
+        stage_totals.append((stage_id, total_duration))
+    
+    stage_totals.sort(key=lambda x: x[1], reverse=True)
+    
+    longest_stage_id = stage_totals[0][0] if stage_totals else None
+    
+    # Take top N stages
+    top_stages = [st[0] for st in stage_totals[:max_stages]]
+    
+    filtered_stages = {}
+    for stage_id in top_stages:
+        tasks = stage_tasks[stage_id]
+        # Sort tasks by task_id to keep their natural partition order
+        tasks.sort(key=lambda t: t.get("task_id", 0))
+        filtered_stages[str(stage_id)] = tasks
 
     return {
         "longest_stage_id": longest_stage_id,
-        "stages": stages_binned,
+        "stages": filtered_stages,
     }
 
 

@@ -48,6 +48,7 @@ CONFIGURABLE_KEYS = [
     "DEFAULT_LIMIT",
     "RANFOR_FILTER",
     "MATCH_WINDOW_MINUTES",
+    "MATCH_STRATEGY",
 ]
 
 # Keys whose values should be masked when sent to the browser
@@ -197,9 +198,11 @@ def extract_job_summary(job_data: dict) -> dict:
     }
 
 
-def match_jobs(aac_jobs: list[dict], onprem_jobs: list[dict], window_minutes: int = 10) -> list[dict]:
+def match_jobs(aac_jobs: list[dict], onprem_jobs: list[dict], window_minutes: int = 10, strategy: str = "time_and_name") -> list[dict]:
     """
-    Match AAC and on-prem jobs by createdAt within ±window_minutes.
+    Match AAC and on-prem jobs.
+    If strategy == "name_only": Match sequentially based on flowName only, assuming arrays are sorted newest-first.
+    Otherwise: Match by flowName and createdAt within ±window_minutes.
     Returns a list of paired rows.
     """
     used_onprem = set()
@@ -207,13 +210,30 @@ def match_jobs(aac_jobs: list[dict], onprem_jobs: list[dict], window_minutes: in
 
     for aac in aac_jobs:
         aac_dt = parse_iso(aac.get("createdAt", ""))
+        aac_flow = aac.get("flowName", "").strip()
         best_match = None
         best_delta = None
 
-        if aac_dt:
+        if strategy == "name_only":
             for idx, op in enumerate(onprem_jobs):
                 if idx in used_onprem:
                     continue
+                op_flow = op.get("flowName", "").strip()
+                if aac_flow and op_flow and aac_flow.lower() != op_flow.lower():
+                    continue
+                # Match found! (first one that hasn't been used yet is the most recent)
+                best_match = idx
+                break
+        elif aac_dt:
+            for idx, op in enumerate(onprem_jobs):
+                if idx in used_onprem:
+                    continue
+                
+                # Flow names must match
+                op_flow = op.get("flowName", "").strip()
+                if aac_flow and op_flow and aac_flow.lower() != op_flow.lower():
+                    continue
+
                 op_dt = parse_iso(op.get("createdAt", ""))
                 if op_dt:
                     delta = abs((aac_dt - op_dt).total_seconds())
@@ -296,7 +316,8 @@ def fetch_jobs():
 
     # Match jobs using configurable window
     window = Config.MATCH_WINDOW_MINUTES
-    new_pairs = match_jobs(results["aac"], results["onprem"], window_minutes=window)
+    strategy = getattr(Config, "MATCH_STRATEGY", "time_and_name")
+    new_pairs = match_jobs(results["aac"], results["onprem"], window_minutes=window, strategy=strategy)
 
     # Build metadata for storage
     aac_base = base_host(Config.PLATFORM_API_BASE_URL) if Config.PLATFORM_API_BASE_URL else ""

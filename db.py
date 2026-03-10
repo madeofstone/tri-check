@@ -405,9 +405,13 @@ def load_flow(name: str) -> Optional[dict]:
         row = conn.execute("SELECT * FROM flows WHERE name = ?", (name,)).fetchone()
     if not row:
         return None
+    
+    pairs = json.loads(row["pairs"]) if row["pairs"] else []
+    _sort_pairs(pairs)
+
     return {
         "name": row["name"],
-        "pairs": json.loads(row["pairs"]) if row["pairs"] else [],
+        "pairs": pairs,
         "aacBaseUrl": row["aac_base_url"] or "",
         "onpremBaseUrl": row["onprem_base_url"] or "",
         "onpremEnabled": bool(row["onprem_enabled"]),
@@ -466,6 +470,7 @@ def merge_jobs_flow(name: str, new_pairs: list, metadata: dict) -> list:
             existing_pairs.append(pair)
             index[key] = pair
 
+    _sort_pairs(existing_pairs)
     save_flow(name, existing_pairs, metadata)
     return existing_pairs
 
@@ -478,6 +483,15 @@ def _pair_key(pair: dict) -> Optional[str]:
     if onprem and onprem.get("jobRunId"):
         return f"op_{onprem['jobRunId']}"
     return None
+
+
+def _sort_pairs(pairs: list):
+    """Sort pairs in reverse chronological order based on job createdAt time."""
+    def get_time(p):
+        aac = p.get("aac") or {}
+        op = p.get("onprem") or {}
+        return aac.get("createdAt") or op.get("createdAt") or ""
+    pairs.sort(key=get_time, reverse=True)
 
 
 # ---------------------------------------------------------------------------

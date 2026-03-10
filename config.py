@@ -30,6 +30,7 @@ class Config:
     RANFOR_FILTER: str = os.getenv("RANFOR_FILTER", "recipe,plan")
     DEFAULT_LIMIT: int = int(os.getenv("DEFAULT_LIMIT", "25"))
     MATCH_WINDOW_MINUTES: int = int(os.getenv("MATCH_WINDOW_MINUTES", "10"))
+    MATCH_STRATEGY: str = os.getenv("MATCH_STRATEGY", "time_and_name")
     
     # Databricks Settings
     DATABRICKS_HOST: str = os.getenv("DATABRICKS_HOST", "")
@@ -69,3 +70,5 @@ class Config:
             cls.DEFAULT_LIMIT = kwargs["limit"]
         if kwargs.get("ranfor"):
             cls.RANFOR_FILTER = kwargs["ranfor"]
+        if kwargs.get("match_strategy"):
+            cls.MATCH_STRATEGY = kwargs["match_strategy"]

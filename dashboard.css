@@ -145,6 +145,65 @@
     text-overflow: ellipsis;
 }
 
+/* --- Full-Width Event Timeline Section --------------------- */
+.dash-timeline-section {
+    padding: 20px;
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    margin-bottom: 24px;
+}
+.dash-timeline-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+.dash-zoom-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+.dash-zoom-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+}
+.dash-timeline-chart-wrap {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin-bottom: 4px;
+    position: relative;
+}
+.dash-timeline-chart-wrap:last-child {
+    margin-bottom: 0;
+}
+.dash-timeline-label {
+    writing-mode: vertical-lr;
+    transform: rotate(180deg);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 6px;
+    min-width: 24px;
+}
+.dash-timeline-chart-wrap canvas {
+    flex: 1;
+    min-height: 0;
+}
+
 /* --- Red Flags --------------------------------------------- */
 .dash-flags-section {
     margin-bottom: 24px;

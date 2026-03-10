@@ -17,6 +17,21 @@ let _tuningRules = null;
 // Track which tab opened the dashboard so we can close to the right place
 let _dashOrigin = null; // { slider, panel, main }
 
+// References for synced zoom/pan between executor and stage charts
+let _execTimelineChart = null;
+let _stageTimelineChart = null;
+let _zoomEnabled = false;
+let _timelineMin = null; // shared x-axis min (ms timestamp)
+let _timelineMax = null; // shared x-axis max (ms timestamp)
+
+// Toggle zoom/pan on both timeline charts
+function toggleDashZoom(cb) {
+    _zoomEnabled = cb.checked;
+    // Pan and zoom are always "enabled" in config but gated by
+    // onPanStart / onZoomStart returning false when the checkbox is off.
+    // No chart update needed — the callbacks check _zoomEnabled live.
+}
+
 // ---------------------------------------------------------------------------
 // Helpers — find the correct slider elements for the active tab
 // ---------------------------------------------------------------------------
@@ -37,6 +52,50 @@ function _getDashElements() {
         panel: document.getElementById("dashboardPanel"),
         main: document.getElementById("mainContent"),
     };
+}
+
+// ---------------------------------------------------------------------------
+// Compute shared min/max time range for executor + stage timeline charts
+// ---------------------------------------------------------------------------
+
+function _computeTimelineRange(analysis) {
+    const startTime = analysis.metadata?.start_time || 0;
+    let minTs = startTime;
+    let maxTs = startTime;
+
+    // Executor events
+    const events = analysis.executor_timeline || [];
+    events.forEach(ev => {
+        if (ev.timestamp < minTs) minTs = ev.timestamp;
+        if (ev.timestamp > maxTs) maxTs = ev.timestamp;
+    });
+
+    // Pending task timeline
+    const pending = analysis.pending_task_timeline || [];
+    pending.forEach(pt => {
+        if (pt.timestamp < minTs) minTs = pt.timestamp;
+        if (pt.timestamp > maxTs) maxTs = pt.timestamp;
+    });
+
+    // Stage submission/completion
+    const stages = analysis.stages || [];
+    stages.forEach(s => {
+        if (s.submission_time_iso) {
+            const t = new Date(s.submission_time_iso).getTime();
+            if (t < minTs) minTs = t;
+            if (t > maxTs) maxTs = t;
+        }
+        if (s.completion_time_iso) {
+            const t = new Date(s.completion_time_iso).getTime();
+            if (t < minTs) minTs = t;
+            if (t > maxTs) maxTs = t;
+        }
+    });
+
+    // Add 2% padding
+    const span = maxTs - minTs;
+    _timelineMin = minTs - span * 0.02;
+    _timelineMax = maxTs + span * 0.02;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,14 +136,16 @@ async function openDashboard(analysis, jobRunId) {
     // Render charts after transition settles
     requestAnimationFrame(() => {
         setTimeout(() => {
+            // Compute shared time range for both timeline charts
+            _computeTimelineRange(analysis);
             renderExecutorTimeline(analysis);
             renderTaskDistribution(analysis);
             renderStageWaterfall(analysis);
-            // Stage task bins — default to longest stage
+            // Partition Size & Duration — default to longest stage
             const stb = analysis.stage_task_bins || {};
             const defaultStage = stb.longest_stage_id;
             if (defaultStage != null) {
-                renderStageTaskBins(analysis, defaultStage);
+                renderPartitionSizeChart(analysis, defaultStage);
             }
         }, 100);
     });
@@ -106,6 +167,11 @@ function closeDashboard() {
         els.main.classList.remove("slider-active");
         _dashCharts.forEach(c => c.destroy());
         _dashCharts = [];
+        _execTimelineChart = null;
+        _stageTimelineChart = null;
+        _zoomEnabled = false;
+        _timelineMin = null;
+        _timelineMax = null;
         _dashOrigin = null;
     }, 500);
 }
@@ -138,36 +204,45 @@ function buildDashboardHTML(analysis, jobRunId) {
     // KPI Cards
     html += buildKPICards(summary, config);
 
-    // Two-column layout: charts (left) + tuning panel (right)
+    // ── Full-width Event Timeline section ──
+    html += `<div class="dash-timeline-section">`;
+    html += `<div class="dash-timeline-header">`;
+    html += `<div class="dash-chart-title" style="margin-bottom:0">Event Timeline</div>`;
+    html += `<label class="dash-zoom-toggle"><input type="checkbox" id="dashZoomToggle" onchange="toggleDashZoom(this)"> Enable zooming</label>`;
+    html += `</div>`;
+
+    // Executor Scaling Timeline
+    html += `<div class="dash-timeline-chart-wrap">`;
+    html += `<div class="dash-timeline-label">Executors</div>`;
+    html += `<canvas id="executorTimelineChart" class="dash-chart-canvas"></canvas>`;
+    html += `</div>`;
+
+    // Stage Performance Breakdown (directly below, shared time axis)
+    html += `<div class="dash-timeline-chart-wrap">`;
+    html += `<div class="dash-timeline-label">Stages</div>`;
+    html += `<canvas id="stageWaterfallChart" class="dash-chart-canvas"></canvas>`;
+    html += `</div>`;
+
+    // Partition Size & Duration
+    html += `<div class="dash-partition-chart-wrap" style="margin-top: 24px; padding-top: 24px; border-top: 1px solid rgba(255,255,255,0.06);">`;
+    html += `<div class="dash-chart-title">Partition Size & Duration</div>`;
+    html += `<div id="partitionSizeLabel" class="dash-chart-subtitle"></div>`;
+    html += `<canvas id="partitionSizeChart" class="dash-chart-canvas" style="height: 250px;"></canvas>`;
+    html += `</div>`;
+
+    html += `</div>`; // .dash-timeline-section
+
+    // ── Two-column layout: remaining charts + tuning panel ──
     html += `<div class="dash-main-layout">`;
 
     // LEFT: Charts column
     html += `<div class="dash-charts-col">`;
     html += `<div class="dash-charts-row">`;
 
-    // 1. Executor Scaling Timeline (with pending tasks)
-    html += `<div class="dash-chart-card">`;
-    html += `<div class="dash-chart-title">Executor Scaling Timeline</div>`;
-    html += `<canvas id="executorTimelineChart" class="dash-chart-canvas"></canvas>`;
-    html += `</div>`;
-
-    // 2. Task Distribution & Core Parallelism
+    // Task Distribution & Core Parallelism
     html += `<div class="dash-chart-card">`;
     html += `<div class="dash-chart-title">Task Distribution & Core Parallelism</div>`;
     html += `<canvas id="taskDistributionChart" class="dash-chart-canvas"></canvas>`;
-    html += `</div>`;
-
-    // 3. Stage Performance Breakdown (Waterfall)
-    html += `<div class="dash-chart-card">`;
-    html += `<div class="dash-chart-title">Stage Performance Breakdown</div>`;
-    html += `<canvas id="stageWaterfallChart" class="dash-chart-canvas-tall"></canvas>`;
-    html += `</div>`;
-
-    // 4. Stage Task Breakdown (Binned)
-    html += `<div class="dash-chart-card">`;
-    html += `<div class="dash-chart-title">Stage Task Breakdown</div>`;
-    html += `<div id="stageTaskBinsLabel" class="dash-chart-subtitle"></div>`;
-    html += `<canvas id="stageTaskBinsChart" class="dash-chart-canvas"></canvas>`;
     html += `</div>`;
 
     html += `</div>`; // .dash-charts-row
@@ -395,18 +470,17 @@ function renderExecutorTimeline(analysis) {
         e => e.event === "added" || e.event === "removed"
     );
 
-    // Build step data — running count of active executors
+    // Build step data — running count of active executors, using real timestamps
     let count = 0;
-    const executorPoints = [{ x: 0, y: 0 }];
+    const executorPoints = [{ x: startTime, y: 0 }];
 
     events.forEach(ev => {
-        const secFromStart = (ev.timestamp - startTime) / 1000;
         if (ev.event === "added") {
             count++;
         } else if (ev.event === "removed") {
             count = Math.max(0, count - 1);
         }
-        executorPoints.push({ x: Math.round(secFromStart * 10) / 10, y: count });
+        executorPoints.push({ x: ev.timestamp, y: count });
     });
 
     // Add endpoint if we have stage data
@@ -415,17 +489,16 @@ function renderExecutorTimeline(analysis) {
         const lastStage = stages[stages.length - 1];
         if (lastStage.completion_time_iso) {
             const endTs = new Date(lastStage.completion_time_iso).getTime();
-            const endSec = (endTs - startTime) / 1000;
-            if (endSec > executorPoints[executorPoints.length - 1].x) {
-                executorPoints.push({ x: Math.round(endSec * 10) / 10, y: count });
+            if (endTs > executorPoints[executorPoints.length - 1].x) {
+                executorPoints.push({ x: endTs, y: count });
             }
         }
     }
 
-    // Build pending tasks data
+    // Build pending tasks data using real timestamps
     const pendingTimeline = analysis.pending_task_timeline || [];
     const pendingPoints = pendingTimeline.map(pt => ({
-        x: Math.round(((pt.timestamp - startTime) / 1000) * 10) / 10,
+        x: pt.timestamp,
         y: pt.pending,
     }));
 
@@ -473,10 +546,21 @@ function renderExecutorTimeline(analysis) {
             },
             scales: {
                 x: {
-                    type: "linear",
-                    title: { display: true, text: "Seconds from App Start", color: "#9498ab", font: { size: 11 } },
-                    ticks: { color: "#5d6177", font: { size: 10 } },
-                    grid: { color: "rgba(255,255,255,0.04)" },
+                    type: "time",
+                    time: {
+                        displayFormats: {
+                            second: "HH:mm:ss",
+                            minute: "HH:mm",
+                            hour: "HH:mm",
+                        },
+                        tooltipFormat: "yyyy/MM/dd HH:mm:ss",
+                    },
+                    // Hide x-axis labels — the stage chart below shows the shared axis
+                    ticks: { display: false },
+                    grid: { color: "rgba(255,255,255,0.04)", drawTicks: false },
+                    // Shared min/max so grid lines align with stage chart
+                    min: _timelineMin,
+                    max: _timelineMax,
                 },
                 y: {
                     position: "left",
@@ -504,13 +588,38 @@ function renderExecutorTimeline(analysis) {
                     bodyColor: "#9498ab",
                     borderColor: "rgba(255,255,255,0.1)",
                     borderWidth: 1,
-                    callbacks: {
-                        title: (items) => `${items[0].parsed.x}s from start`,
+                },
+                zoom: {
+                    pan: {
+                        enabled: true,
+                        mode: "x",
+                        onPanStart: () => _zoomEnabled,
+                        onPan: ({ chart: src }) => {
+                            if (_stageTimelineChart && src !== _stageTimelineChart) {
+                                _stageTimelineChart.options.scales.x.min = src.scales.x.min;
+                                _stageTimelineChart.options.scales.x.max = src.scales.x.max;
+                                _stageTimelineChart.update('none');
+                            }
+                        },
+                    },
+                    zoom: {
+                        wheel: { enabled: true },
+                        pinch: { enabled: true },
+                        mode: "x",
+                        onZoomStart: () => _zoomEnabled,
+                        onZoom: ({ chart: src }) => {
+                            if (_stageTimelineChart && src !== _stageTimelineChart) {
+                                _stageTimelineChart.options.scales.x.min = src.scales.x.min;
+                                _stageTimelineChart.options.scales.x.max = src.scales.x.max;
+                                _stageTimelineChart.update('none');
+                            }
+                        },
                     },
                 },
             },
         },
     });
+    _execTimelineChart = chart;
     _dashCharts.push(chart);
 }
 
@@ -653,99 +762,173 @@ function renderStageWaterfall(analysis) {
     const stages = analysis.stages || [];
     if (stages.length === 0) return;
 
-    const startTime = analysis.metadata?.start_time || 0;
-
-    const labels = stages.map(s => `S${s.stage_id}`);
-
-    // For each stage, compute start/end offset in seconds and segment breakdown
-    const computeBars = [];
-    const gcBars = [];
-    const delayBars = [];
-
-    stages.forEach(s => {
-        // Parse stage submission/completion to seconds from app start
+    // ── Pack stages into compact rows (non-overlapping stages share rows) ──
+    // Each stage occupies [subTs, compTs]. We greedily assign to the first row
+    // whose last stage ended before this one starts.
+    const stageInfos = stages.map(s => {
         const subIso = s.submission_time_iso;
         const compIso = s.completion_time_iso;
-        if (!subIso || !compIso) {
-            computeBars.push([0, 0]);
-            gcBars.push([0, 0]);
-            delayBars.push([0, 0]);
-            return;
+        const subTs = subIso ? new Date(subIso).getTime() : 0;
+        const compTs = compIso ? new Date(compIso).getTime() : subTs;
+        return { stage: s, subTs, compTs };
+    }).filter(si => si.subTs > 0);
+
+    // Sort by submission time for greedy row packing
+    stageInfos.sort((a, b) => a.subTs - b.subTs);
+
+    // rows[i] = end timestamp of last stage in row i
+    const rows = [];
+    const rowAssignments = []; // { stageInfo, row }
+
+    stageInfos.forEach(si => {
+        let placed = false;
+        for (let r = 0; r < rows.length; r++) {
+            if (si.subTs >= rows[r]) {
+                rows[r] = si.compTs;
+                rowAssignments.push({ ...si, row: r });
+                placed = true;
+                break;
+            }
         }
+        if (!placed) {
+            rows.push(si.compTs);
+            rowAssignments.push({ ...si, row: rows.length - 1 });
+        }
+    });
 
-        const subSec = (new Date(subIso).getTime() - startTime) / 1000;
-        const compSec = (new Date(compIso).getTime() - startTime) / 1000;
+    const numRows = rows.length;
 
-        const schedulingDelaySec = (s.scheduling_delay_ms || 0) / 1000;
-        const gcSec = (s.task_summary?.gc_time_ms?.total || 0) / 1000;
-        const totalRunSec = (s.task_summary?.run_time_ms?.total || 0) / 1000;
-        const computeSec = Math.max(0, totalRunSec - gcSec);
+    // Build datasets: for each stage create a floating bar on its assigned row
+    // We use separate datasets per stage so each bar sits on the correct y index
+    // Approach: create 3 datasets (delay, compute, gc) each with data arrays of
+    // length = numRows, where only the matching row index has a value.
+    // BUT since multiple stages can share a row, we need one set of 3 datasets
+    // per stage to avoid data collisions on the same row.
+    //
+    // Simpler approach: use a custom rendering. We'll create a single bar dataset
+    // per stage (showing the full bar) and overlay segments via a plugin.
+    //
+    // Actually, simplest: create arrays of per-stage data where each entry is
+    // placed on its row. Use stacked bars per row.
+    //
+    // Best approach for Chart.js horizontal bar: create 3 parallel arrays
+    // (delay, compute, gc) per stage as individual dataset groups.
+    // Since we have many stages, let's use a flat approach:
+    // - labels = row indices 0..numRows-1
+    // - For each stage, create 3 datasets (delay segment, compute segment, gc segment)
+    //   each containing a sparse array where only the row index has the [start, end] value.
+    //
+    // To keep it manageable, we'll group all stages into 3 datasets by type,
+    // with data indexed by a combined key. But Chart.js floating bars expect
+    // one value per label index per dataset.
+    //
+    // Because multiple stages can sit on the same row, we need per-stage datasets.
+    // Let's create groups of 3 datasets per stage.
 
-        // Segments stacked within the stage's time window
-        const stageSpan = compSec - subSec;
-        const rawTotal = schedulingDelaySec + computeSec + gcSec;
+    const labels = Array.from({ length: numRows }, (_, i) => i);
+    const datasets = [];
+    const stageMap = []; // maps datasetGroupIndex -> stageInfo for click handling
 
-        // Scale segments to fit within the visible stage span
-        const scale = rawTotal > 0 ? stageSpan / rawTotal : 1;
+    rowAssignments.forEach((ra, idx) => {
+        const s = ra.stage;
+        const subTs = ra.subTs;
+        const compTs = ra.compTs;
 
-        const delayEnd = subSec + schedulingDelaySec * scale;
-        const computeEnd = delayEnd + computeSec * scale;
-        const gcEnd = computeEnd + gcSec * scale;
+        const schedulingDelayMs = s.scheduling_delay_ms || 0;
+        const gcMs = s.task_summary?.gc_time_ms?.total || 0;
+        const totalRunMs = s.task_summary?.run_time_ms?.total || 0;
+        const computeMs = Math.max(0, totalRunMs - gcMs);
 
-        delayBars.push([subSec, delayEnd]);
-        computeBars.push([delayEnd, computeEnd]);
-        gcBars.push([computeEnd, gcEnd]);
+        // Scale segments to fit within the actual wall-clock span
+        const stageSpanMs = compTs - subTs;
+        const rawTotalMs = schedulingDelayMs + computeMs + gcMs;
+        const scale = rawTotalMs > 0 ? stageSpanMs / rawTotalMs : 1;
+
+        const delayEnd = subTs + schedulingDelayMs * scale;
+        const computeEnd = delayEnd + computeMs * scale;
+        const gcEnd = computeEnd + gcMs * scale;
+
+        // Sparse data: only the assigned row has a value
+        const emptyRow = labels.map(() => null);
+
+        const delayData = [...emptyRow];
+        const computeData = [...emptyRow];
+        const gcData = [...emptyRow];
+
+        delayData[ra.row] = [subTs, delayEnd];
+        computeData[ra.row] = [delayEnd, computeEnd];
+        gcData[ra.row] = [computeEnd, gcEnd];
+
+        const showLegend = idx === 0; // only show legend labels once
+
+        datasets.push({
+            label: showLegend ? "Scheduling Delay" : "",
+            data: delayData,
+            backgroundColor: "#fbbf24",
+            borderRadius: 2,
+            barPercentage: 0.9,
+            categoryPercentage: 0.95,
+            _stageIdx: idx,
+        });
+        datasets.push({
+            label: showLegend ? "Compute" : "",
+            data: computeData,
+            backgroundColor: "#34d399",
+            borderRadius: 2,
+            barPercentage: 0.9,
+            categoryPercentage: 0.95,
+            _stageIdx: idx,
+        });
+        datasets.push({
+            label: showLegend ? "GC Time" : "",
+            data: gcData,
+            backgroundColor: "#f87171",
+            borderRadius: 2,
+            barPercentage: 0.9,
+            categoryPercentage: 0.95,
+            _stageIdx: idx,
+        });
+
+        stageMap.push(ra);
     });
 
     const chart = new Chart(canvas, {
         type: "bar",
-        data: {
-            labels,
-            datasets: [
-                {
-                    label: "Scheduling Delay",
-                    data: delayBars,
-                    backgroundColor: "#fbbf24",
-                    borderRadius: 2,
-                    barThickness: 30,
-                },
-                {
-                    label: "Compute",
-                    data: computeBars,
-                    backgroundColor: "#34d399",
-                    borderRadius: 2,
-                    barThickness: 30,
-                },
-                {
-                    label: "GC Time",
-                    data: gcBars,
-                    backgroundColor: "#f87171",
-                    borderRadius: 2,
-                    barThickness: 30,
-                },
-            ],
-        },
+        data: { labels, datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             indexAxis: "y",
             scales: {
                 x: {
-                    type: "linear",
-                    title: { display: true, text: "Seconds from App Start", color: "#9498ab", font: { size: 11 } },
-                    ticks: { color: "#5d6177", font: { size: 10 } },
+                    type: "time",
+                    time: {
+                        displayFormats: {
+                            second: "HH:mm:ss",
+                            minute: "HH:mm",
+                            hour: "HH:mm",
+                        },
+                        tooltipFormat: "yyyy/MM/dd HH:mm:ss",
+                    },
+                    ticks: { color: "#5d6177", font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 15 },
                     grid: { color: "rgba(255,255,255,0.04)" },
+                    // Shared min/max so grid lines align with executor chart
+                    min: _timelineMin,
+                    max: _timelineMax,
                 },
                 y: {
                     stacked: true,
-                    ticks: { color: "#9498ab", font: { size: 11, weight: "600" } },
+                    ticks: { display: false },
                     grid: { display: false },
                 },
             },
             plugins: {
                 legend: {
                     position: "top",
-                    labels: { color: "#9498ab", font: { size: 11 }, boxWidth: 12, padding: 16 },
+                    labels: {
+                        color: "#9498ab", font: { size: 11 }, boxWidth: 12, padding: 16,
+                        filter: (item) => item.text && item.text.length > 0,
+                    },
                 },
                 tooltip: {
                     backgroundColor: "#232738",
@@ -754,33 +937,93 @@ function renderStageWaterfall(analysis) {
                     borderColor: "rgba(255,255,255,0.1)",
                     borderWidth: 1,
                     callbacks: {
+                        title: (items) => {
+                            const dsIdx = items[0].datasetIndex;
+                            const stageIdx = Math.floor(dsIdx / 3);
+                            const ra = rowAssignments[stageIdx];
+                            return ra ? `S${ra.stage.stage_id}` : "";
+                        },
                         afterTitle: (items) => {
-                            const idx = items[0].dataIndex;
-                            const stage = stages[idx];
-                            return stage ? stage.stage_name.substring(0, 50) : "";
+                            const dsIdx = items[0].datasetIndex;
+                            const stageIdx = Math.floor(dsIdx / 3);
+                            const ra = rowAssignments[stageIdx];
+                            return ra ? ra.stage.stage_name.substring(0, 60) : "";
                         },
                         label: (item) => {
                             const range = item.raw;
-                            if (Array.isArray(range)) {
-                                const dur = range[1] - range[0];
-                                return ` ${item.dataset.label}: ${dur.toFixed(1)}s`;
+                            if (Array.isArray(range) && range[0] != null) {
+                                const durSec = (range[1] - range[0]) / 1000;
+                                return ` ${item.dataset.label || "Segment"}: ${durSec.toFixed(1)}s`;
                             }
-                            return ` ${item.dataset.label}: ${item.raw}`;
+                            return "";
+                        },
+                        afterLabel: (item) => {
+                            // Only append the extra info onto the last segment of the stage's tooltip
+                            // to avoid duplicating the lines for Delay, Compute, and GC.
+                            // We can use datasetIndex to see if it's the last one (GC Time is index % 3 === 2, but a user might only hover over one segment at a time depending on tooltip mode)
+                            const dsIdx = item.datasetIndex;
+                            const stageIdx = Math.floor(dsIdx / 3);
+                            const ra = rowAssignments[stageIdx];
+                            if (!ra) return "";
+
+                            // If hovering over the specific segment, add the stage-level details
+                            const s = ra.stage;
+                            const durSec = (s.duration_ms || 0) / 1000;
+                            const tasks = s.task_summary?.total_tasks || 0;
+                            const inputBytes = s.io?.input_bytes || 0;
+                            const shuffleReadBytes = s.shuffle?.read_bytes || 0;
+
+                            return [
+                                ``,
+                                ` Total Partitions: ${tasks}`,
+                                ` Stage Duration: ${durSec.toFixed(1)}s`,
+                                ` Source Read: ${_formatBytes(inputBytes)}`,
+                                ` Shuffle Read: ${_formatBytes(shuffleReadBytes)}`
+                            ];
+                        },
+                    },
+                },
+                zoom: {
+                    pan: {
+                        enabled: true,
+                        mode: "x",
+                        onPanStart: () => _zoomEnabled,
+                        onPan: ({ chart: src }) => {
+                            if (_execTimelineChart && src !== _execTimelineChart) {
+                                _execTimelineChart.options.scales.x.min = src.scales.x.min;
+                                _execTimelineChart.options.scales.x.max = src.scales.x.max;
+                                _execTimelineChart.update('none');
+                            }
+                        },
+                    },
+                    zoom: {
+                        wheel: { enabled: true },
+                        pinch: { enabled: true },
+                        mode: "x",
+                        onZoomStart: () => _zoomEnabled,
+                        onZoom: ({ chart: src }) => {
+                            if (_execTimelineChart && src !== _execTimelineChart) {
+                                _execTimelineChart.options.scales.x.min = src.scales.x.min;
+                                _execTimelineChart.options.scales.x.max = src.scales.x.max;
+                                _execTimelineChart.update('none');
+                            }
                         },
                     },
                 },
             },
             onClick: (_event, elements) => {
                 if (elements.length > 0 && _dashAnalysis) {
-                    const idx = elements[0].index;
-                    const stage = stages[idx];
-                    if (stage) {
-                        renderStageTaskBins(_dashAnalysis, stage.stage_id);
+                    const dsIdx = elements[0].datasetIndex;
+                    const stageIdx = Math.floor(dsIdx / 3);
+                    const ra = rowAssignments[stageIdx];
+                    if (ra) {
+                        renderPartitionSizeChart(_dashAnalysis, ra.stage.stage_id);
                     }
                 }
             },
         },
     });
+    _stageTimelineChart = chart;
     _dashCharts.push(chart);
 }
 
@@ -788,33 +1031,38 @@ function renderStageWaterfall(analysis) {
 // 4. Stage Task Breakdown (Binned)
 // ---------------------------------------------------------------------------
 
-function renderStageTaskBins(analysis, stageId) {
-    const canvas = document.getElementById("stageTaskBinsChart");
-    const label = document.getElementById("stageTaskBinsLabel");
+function renderPartitionSizeChart(analysis, stageId) {
+    const canvas = document.getElementById("partitionSizeChart");
+    const label = document.getElementById("partitionSizeLabel");
     if (!canvas) return;
 
     const stb = analysis.stage_task_bins || {};
-    const stageBins = (stb.stages || {})[String(stageId)];
-    if (!stageBins || stageBins.length === 0) {
+    const stageTasks = (stb.stages || {})[String(stageId)];
+    if (!stageTasks || stageTasks.length === 0) {
         if (label) label.textContent = `Stage ${stageId} — no task data`;
         return;
     }
 
-    // Find the stage name
+    // Find the stage name and task count
     const stages = analysis.stages || [];
     const stageInfo = stages.find(s => s.stage_id === stageId);
+    const taskCount = stageInfo?.task_summary?.total_tasks || stageTasks.length;
     const stageName = stageInfo ?
-        `Stage ${stageId}: ${stageInfo.stage_name?.substring(0, 60) || ""}` :
-        `Stage ${stageId}`;
+        `Stage ${stageId}: ${stageInfo.stage_name?.substring(0, 60) || ""} (${taskCount} partitions)` :
+        `Stage ${stageId} (${taskCount} partitions)`;
     if (label) label.textContent = stageName;
 
-    const binLabels = stageBins.map(b => b.label);
-    // Convert ms to seconds for compute; spill stays in bytes for tooltip
-    const computeData = stageBins.map(b => Math.max(0, (b.avg_duration_ms - b.avg_gc_ms)) / 1000);
-    const gcData = stageBins.map(b => b.avg_gc_ms / 1000);
-    const spillData = stageBins.map(b => b.avg_spill_bytes);
+    // Use task_id for x-axis
+    const binLabels = stageTasks.map(t => `Task ${t.task_id}`);
+    
+    // Bar data
+    const inputData = stageTasks.map(t => t.input_bytes || 0);
+    const shuffleData = stageTasks.map(t => t.shuffle_read_bytes || 0);
+    
+    // Line data
+    const durationData = stageTasks.map(t => (t.duration_ms || 0) / 1000);
 
-    // Destroy existing task bins chart if present
+    // Destroy existing chart if present
     const existingIdx = _dashCharts.findIndex(c => c.canvas === canvas);
     if (existingIdx !== -1) {
         _dashCharts[existingIdx].destroy();
@@ -827,55 +1075,66 @@ function renderStageTaskBins(analysis, stageId) {
             labels: binLabels,
             datasets: [
                 {
-                    label: "Compute Time",
-                    data: computeData,
-                    backgroundColor: "#34d399",
+                    label: "Source Read",
+                    data: inputData,
+                    backgroundColor: "#3b82f6", // Blue
                     borderRadius: 2,
                     yAxisID: "y",
+                    order: 2,
                 },
                 {
-                    label: "GC Time",
-                    data: gcData,
-                    backgroundColor: "#f87171",
+                    label: "Shuffle Read",
+                    data: shuffleData,
+                    backgroundColor: "#8b5cf6", // Purple
                     borderRadius: 2,
                     yAxisID: "y",
+                    order: 2,
                 },
                 {
-                    label: "Disk Spill",
-                    data: spillData,
-                    backgroundColor: "#fbbf24",
-                    borderRadius: 2,
+                    label: "Duration",
+                    data: durationData,
+                    type: "line",
+                    borderColor: "#fb923c", // Orange
+                    backgroundColor: "transparent",
+                    borderWidth: 2,
+                    stepped: "middle",
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
                     yAxisID: "y1",
+                    order: 1,
                 },
             ],
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            interaction: {
+                mode: "index",
+                intersect: false,
+            },
             scales: {
                 x: {
                     stacked: true,
-                    ticks: { color: "#9498ab", font: { size: 10 } },
+                    ticks: { color: "#9498ab", font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 20 },
                     grid: { display: false },
                 },
                 y: {
                     stacked: true,
                     position: "left",
                     beginAtZero: true,
-                    title: { display: true, text: "Duration (seconds)", color: "#9498ab", font: { size: 11 } },
-                    ticks: { color: "#5d6177", font: { size: 10 } },
+                    title: { display: true, text: "Data Read (bytes)", color: "#a5b4fc", font: { size: 11 } },
+                    ticks: {
+                        color: "#a5b4fc",
+                        font: { size: 10 },
+                        callback: (val) => _formatBytes(val),
+                    },
                     grid: { color: "rgba(255,255,255,0.04)" },
                 },
                 y1: {
-                    stacked: true,
                     position: "right",
                     beginAtZero: true,
-                    title: { display: true, text: "Disk Spill (bytes)", color: "#fbbf24", font: { size: 11 } },
-                    ticks: {
-                        color: "#fbbf24",
-                        font: { size: 10 },
-                        callback: (val) => fmtBytes(val),
-                    },
+                    title: { display: true, text: "Duration (seconds)", color: "#fdba74", font: { size: 11 } },
+                    ticks: { color: "#fdba74", font: { size: 10 } },
                     grid: { drawOnChartArea: false },
                 },
             },
@@ -892,10 +1151,25 @@ function renderStageTaskBins(analysis, stageId) {
                     borderWidth: 1,
                     callbacks: {
                         label: (item) => {
-                            if (item.dataset.label === "Disk Spill") {
-                                return ` ${item.dataset.label}: ${fmtBytes(item.raw)}`;
+                            if (item.dataset.label === "Duration") {
+                                return ` Duration: ${item.raw.toFixed(1)}s`;
                             }
-                            return ` ${item.dataset.label}: ${item.raw.toFixed(2)}s`;
+                            
+                            // For data size bars, also show the total
+                            const idx = item.dataIndex;
+                            const input = inputData[idx] || 0;
+                            const shuffle = shuffleData[idx] || 0;
+                            const total = input + shuffle;
+
+                            const lines = [
+                                ` ${item.dataset.label}: ${_formatBytes(item.raw)}`,
+                            ];
+                            
+                            // Since it's stacked, show total on the top bar (which is usually Source Read due to order, or whichever is hovered)
+                            // To be simple, we can just append the total to the tooltip of either.
+                            lines.push(` Total Read: ${_formatBytes(total)}`);
+                            
+                            return lines;
                         },
                     },
                 },

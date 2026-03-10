@@ -654,7 +654,11 @@ const SETTINGS_CONFIG = [
     { section: "Query Settings", keys: [
         { key: "DEFAULT_LIMIT", label: "Default Limit", type: "number" },
         { key: "RANFOR_FILTER", label: "Ranfor Filter", type: "text" },
-        { key: "MATCH_WINDOW_MINUTES", label: "Match Window (minutes)", type: "number" },
+        { key: "MATCH_STRATEGY", label: "Match Strategy", type: "select", options: [
+            { value: "time_and_name", text: "Time and Name" },
+            { value: "name_only", text: "Name Only (Ordered matching)" }
+        ]},
+        { key: "MATCH_WINDOW_MINUTES", label: "Match Window (min, if Time & Name)", type: "number" },
     ]},
 ];
 
@@ -693,7 +697,7 @@ function renderSettingsForm(config) {
         }
 
         html += `<div class="settings-section-fields">`;
-        section.keys.forEach(({ key, label, type }) => {
+        section.keys.forEach(({ key, label, type, options }) => {
             const val = config[key]?.value || "";
             const isMasked = config[key]?.masked || false;
             html += `<label for="cfg_${key}">${label}</label>`;
@@ -704,6 +708,13 @@ function renderSettingsForm(config) {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                     </button>
                 </div>`;
+            } else if (type === "select") {
+                html += `<select id="cfg_${key}" data-key="${key}" ${hasToggle && !isEnabled ? "disabled" : ""}>`;
+                options.forEach(opt => {
+                    const selected = (val === opt.value) ? "selected" : "";
+                    html += `<option value="${esc(opt.value)}" ${selected}>${esc(opt.text)}</option>`;
+                });
+                html += `</select>`;
             } else {
                 html += `<input type="${type}" id="cfg_${key}" value="${esc(val)}" data-key="${key}" ${hasToggle && !isEnabled ? "disabled" : ""}>`;
             }
@@ -733,13 +744,13 @@ function closeSettings() {
 }
 
 async function saveSettings() {
-    const inputs = settingsBody.querySelectorAll("input[data-key]");
+    const fields = settingsBody.querySelectorAll("input[data-key], select[data-key]");
     const updates = {};
-    inputs.forEach(input => {
-        const key = input.dataset.key;
-        const val = input.value;
+    fields.forEach(field => {
+        const key = field.dataset.key;
+        const val = field.value;
         // Don't send masked values back — user hasn't changed them
-        if (input.dataset.masked === "true" && val.includes("••")) return;
+        if (field.dataset.masked === "true" && val.includes("••")) return;
         updates[key] = val;
     });
 
