@@ -107,7 +107,7 @@ def reload_config():
     Config.DATABRICKS_HOST = os.getenv("DATABRICKS_HOST", "")
     Config.DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN", "")
     Config.DEFAULT_LIMIT = int(os.getenv("DEFAULT_LIMIT", "25"))
-    Config.ONPREM_ENABLED = os.getenv("ONPREM_ENABLED", "true").lower() in ("true", "1", "yes")
+    Config.ONPREM_ENABLED = os.getenv("ONPREM_ENABLED", "false").lower() in ("true", "1", "yes")
     Config.RANFOR_FILTER = os.getenv("RANFOR_FILTER", "recipe,plan")
     Config.MATCH_WINDOW_MINUTES = int(os.getenv("MATCH_WINDOW_MINUTES", "10"))
 
@@ -298,7 +298,7 @@ def fetch_jobs():
         errors.append("AAC: Missing PLATFORM_API_BASE_URL or PLATFORM_API_TOKEN")
 
     # Fetch on-prem jobs (only if enabled)
-    onprem_enabled = getattr(Config, 'ONPREM_ENABLED', True)
+    onprem_enabled = getattr(Config, 'ONPREM_ENABLED', False)
     if onprem_enabled and Config.ONPREM_API_TOKEN and Config.ONPREM_API_BASE_URL:
         try:
             onprem_api = PlatformAPI(

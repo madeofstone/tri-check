@@ -23,6 +23,7 @@ class Config:
     PLATFORM_API_TOKEN: str = os.getenv("PLATFORM_API_TOKEN", "")
     
     # On-Prem Trifacta API Settings
+    ONPREM_ENABLED: bool = os.getenv("ONPREM_ENABLED", "false").lower() in ("true", "1", "yes")
     ONPREM_API_BASE_URL: str = os.getenv("ONPREM_API_BASE_URL", "")
     ONPREM_API_TOKEN: str = os.getenv("ONPREM_API_TOKEN", "")
     

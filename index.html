@@ -46,16 +46,16 @@
                 <div class="aj-sidebar-body">
                     <!-- Group by Flow toggle -->
                     <div class="aj-filter-group-toggle">
-                        <div class="aj-toggle-row" onclick="document.getElementById('ajGroupToggle').click()">
+                        <label class="aj-toggle-row" for="ajGroupToggle">
                             <div class="aj-toggle-info">
                                 <span class="aj-toggle-title">Group by Flow</span>
                                 <span class="aj-toggle-desc">Collapse jobs into flow groups</span>
                             </div>
-                            <label class="aj-toggle-switch">
+                            <div class="aj-toggle-switch">
                                 <input type="checkbox" id="ajGroupToggle" onchange="ajToggleGroup()">
                                 <span class="aj-toggle-slider"></span>
-                            </label>
-                        </div>
+                            </div>
+                        </label>
                     </div>
 
                     <!-- Status Filter -->

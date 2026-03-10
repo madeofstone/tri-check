@@ -158,11 +158,40 @@ class DatabricksClient:
             "cleanupDurationMs": getattr(run, "cleanup_duration", None),
         }
 
+        # 1. Try to refine node_type_id if we have a running/recent cluster
+        if cluster_id:
+            try:
+                cluster = self.client.clusters.get(cluster_id=cluster_id)
+                actual_node_type_id = getattr(cluster, "node_type_id", node_type_id)
+                if not actual_node_type_id:
+                    actual_node_type_id = getattr(cluster, "driver_node_type_id", None)
+                if actual_node_type_id:
+                    node_type_id = actual_node_type_id
+            except Exception as e:
+                log.warning(f"Could not fetch full cluster details for {cluster_id} (may be terminated): {e}")
+
+        # 2. Look up hardware specs using whatever node_type_id we found
+        memory_mb = None
+        num_cores = None
+        if node_type_id:
+            try:
+                types_resp = self.client.clusters.list_node_types()
+                node_types_list = getattr(types_resp, "node_types", [])
+                for t in node_types_list:
+                    if getattr(t, "node_type_id", None) == node_type_id:
+                        memory_mb = getattr(t, "memory_mb", None)
+                        num_cores = getattr(t, "num_cores", None)
+                        break
+            except Exception as e:
+                log.warning(f"Failed to fetch hardware specs for node type {node_type_id}: {e}")
+
         return {
             "jobName": job_name,
             "sparkConf": spark_conf,
             "clusterId": cluster_id,
             "nodeTypeId": node_type_id,
+            "memoryMb": memory_mb,
+            "numCores": num_cores,
             "autoscale": autoscale,
             "timing": timing,
         }

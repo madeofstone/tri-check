@@ -7,7 +7,7 @@ const API_BASE = "";  // Same origin
 // ---- State ------------------------------------------------
 let flows = [];          // [{name, pairs, errors, aacCount, onpremCount, aacBaseUrl, onpremBaseUrl, onpremEnabled, fetched}]
 let activeFlowIndex = -1;
-let onpremEnabled = true; // global state, updated from config/API
+let onpremEnabled = false; // global state, updated from config/API
 
 // ---- DOM refs ---------------------------------------------
 const sidebar        = document.getElementById("sidebarNav");
@@ -425,6 +425,8 @@ function renderDbxPanel(data) {
     html += `<span class="dbx-tag">Cluster: <strong>${esc(clusterId || "—")}</strong></span>`;
     if (rd.autoscale) html += `<span class="dbx-tag">Workers: <strong>${rd.autoscale.minWorkers}–${rd.autoscale.maxWorkers}</strong></span>`;
     if (rd.nodeTypeId) html += `<span class="dbx-tag">Node: <strong>${esc(rd.nodeTypeId)}</strong></span>`;
+    if (rd.numCores) html += `<span class="dbx-tag">Cores: <strong>${rd.numCores}</strong></span>`;
+    if (rd.memoryMb) html += `<span class="dbx-tag">Memory: <strong>${fmtBytes(rd.memoryMb * 1024 * 1024)}</strong></span>`;
     html += `<span class="dbx-tag">Setup: <strong>${fmtDurationMs(setupMs)}</strong></span>`;
     html += `<span class="dbx-tag">Execution: <strong>${fmtDurationMs(execMs)}</strong></span>`;
     html += `<span class="dbx-tag dbx-tag-total">Total: <strong>${fmtDurationMs(totalMs)}</strong></span>`;
@@ -679,8 +681,8 @@ function renderSettingsForm(config) {
     let html = "";
     SETTINGS_CONFIG.forEach((section, idx) => {
         const hasToggle = !!section.toggleKey;
-        const toggleVal = hasToggle ? (config[section.toggleKey]?.value || "true") : "true";
-        const isEnabled = toggleVal.toLowerCase() === "true" || toggleVal === "1";
+        const toggleVal = hasToggle ? (config[section.toggleKey]?.value || "false") : "true";
+        const isEnabled = toggleVal.toString().toLowerCase() === "true" || toggleVal === "1";
         const disabledClass = hasToggle && !isEnabled ? " settings-section-disabled" : "";
 
         html += `<div class="settings-section${disabledClass}" ${hasToggle ? `data-toggle-section="${section.toggleKey}"` : ""}>`;
