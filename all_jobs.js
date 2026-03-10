@@ -404,6 +404,7 @@ function _ajRenderFlat(jobs) {
     const body = document.getElementById("ajTableBody");
 
     head.innerHTML = `<tr>
+        <th style="width: 40px;"></th>
         <th>Job ID</th>
         <th>Status</th>
         <th>Flow Name</th>
@@ -421,7 +422,9 @@ function _ajRenderFlat(jobs) {
             ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
             : `<span class="cell-empty">—</span>`;
 
+        const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
         return `<tr data-jobid="${j.job_id}">
+            <td><input type="checkbox" class="compare-cb" value="${j.job_id}" onchange="toggleCompareCheck(this, ${j.job_id})" ${isChecked}></td>
             <td><strong>${j.job_id}</strong></td>
             <td>${statusBadge(j.status)}</td>
             <td>${esc(j.flow_name || "—")}</td>
@@ -447,6 +450,7 @@ function _ajRenderGrouped(groups) {
     // Same headers as flat view, but "Job ID" becomes "Jobs"
     head.innerHTML = `<tr>
         <th class="aj-group-toggle-col"></th>
+        <th style="width: 40px;"></th>
         <th>Jobs</th>
         <th>Status</th>
         <th>Flow Name</th>
@@ -489,6 +493,7 @@ function _ajRenderGrouped(groups) {
 
         html += `<tr class="aj-group-header" onclick="ajToggleGroupRow('${gid}')">
             <td class="aj-group-toggle">▸</td>
+            <td></td>
             <td><strong>${g.job_count}</strong></td>
             <td class="aj-status-cell">${statusHtml}</td>
             <td><strong>${esc(g.flow_name || "—")}</strong></td>
@@ -507,8 +512,10 @@ function _ajRenderGrouped(groups) {
                 ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
                 : `<span class="cell-empty">—</span>`;
 
+            const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
             html += `<tr class="aj-group-child ${gid}" style="display:none">
                 <td></td>
+                <td><input type="checkbox" class="compare-cb" value="${j.job_id}" onchange="toggleCompareCheck(this, ${j.job_id})" ${isChecked}></td>
                 <td><strong>${j.job_id}</strong></td>
                 <td>${statusBadge(j.status)}</td>
                 <td>${esc(j.flow_name || "—")}</td>

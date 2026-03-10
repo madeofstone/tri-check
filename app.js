@@ -8,6 +8,7 @@ const API_BASE = "";  // Same origin
 let flows = [];          // [{name, pairs, errors, aacCount, onpremCount, aacBaseUrl, onpremBaseUrl, onpremEnabled, fetched}]
 let activeFlowIndex = -1;
 let onpremEnabled = false; // global state, updated from config/API
+let selectedCompareJobs = []; // [{jobId, flowName, dbxId, source, ...}]
 
 // ---- DOM refs ---------------------------------------------
 const sidebar        = document.getElementById("sidebarNav");
@@ -242,6 +243,7 @@ function renderResults(flow) {
     if (showOnprem) {
         resultsHead.innerHTML = `
             <tr>
+                <th style="width:40px;" rowspan="2"></th>
                 <th colspan="6" class="env-header env-header-onprem">On-Prem Trifacta</th>
                 <th class="divider-header"></th>
                 <th colspan="7" class="env-header env-header-aac">Alteryx Analytics Cloud (AAC)</th>
@@ -255,6 +257,7 @@ function renderResults(flow) {
     } else {
         resultsHead.innerHTML = `
             <tr>
+                <th style="width:40px;" rowspan="2"></th>
                 <th colspan="7" class="env-header env-header-aac">Alteryx Analytics Cloud (AAC)</th>
             </tr>
             <tr>
@@ -284,13 +287,20 @@ function renderResults(flow) {
     flow.pairs.forEach((pair, idx) => {
         const tr = document.createElement("tr");
         tr.dataset.pairIdx = idx;
+        
+        // Grab the primarily relevant AAC job ID for selection (or onprem if AAC missing)
+        const repJob = pair.aac || pair.onprem;
+        const jobId = repJob ? (repJob.jobRunId || repJob.jobGroupId || repJob.job_id) : "";
+        const isChecked = selectedCompareJobs.some(c => c.job_id === jobId) ? "checked" : "";
+        const cbCell = `<td><input type="checkbox" class="compare-cb" value="${jobId}" onchange="toggleCompareCheck(this, '${jobId}')" ${isChecked}></td>`;
+
         if (showOnprem && !pair.matched) tr.className = "row-unmatched";
         if (showOnprem) {
-            tr.innerHTML = renderOnpremCells(pair.onprem, flow.onpremBaseUrl)
+            tr.innerHTML = cbCell + renderOnpremCells(pair.onprem, flow.onpremBaseUrl)
                 + `<td class="divider-col"></td>`
                 + renderAacCells(pair.aac, flow.aacBaseUrl, idx);
         } else {
-            tr.innerHTML = renderAacCells(pair.aac, flow.aacBaseUrl, idx);
+            tr.innerHTML = cbCell + renderAacCells(pair.aac, flow.aacBaseUrl, idx);
         }
         resultsBody.appendChild(tr);
     });
@@ -587,6 +597,34 @@ async function refreshDbxPanel(btn, dbxId, jobRunId) {
         data._jobRunId = jobRunId;
         data._flowName = flowName;
         cell.innerHTML = renderDbxPanel(data);
+        
+        // Update execution_time_min if present in refreshed timing data
+        const execMs = data.runDetails?.timing?.executionDurationMs;
+        if (execMs != null) {
+            const execMin = execMs / 60000;
+            const strJobId = String(jobRunId);
+            
+            // 1. Update active flow array
+            if (flow && flow.pairs) {
+                for (let p of flow.pairs) {
+                    if (p.aac && String(p.aac.jobRunId) === strJobId) p.aac.executionTimeMinutes = execMin;
+                    if (p.onprem && String(p.onprem.jobRunId) === strJobId) p.onprem.executionTimeMinutes = execMin;
+                }
+            }
+            // 2. Update All Jobs global array
+            if (typeof _ajJobs !== 'undefined') {
+                const ajd = _ajJobs.find(j => String(j.job_id) === strJobId);
+                if (ajd) ajd.execution_time_min = execMin;
+            }
+            // 3. Update comparison cache if user has it selected
+            const cmp = selectedCompareJobs.find(c => c.jobId === strJobId);
+            if (cmp && cmp.jobObj) {
+                if (cmp.jobObj.executionTimeMinutes !== undefined) cmp.jobObj.executionTimeMinutes = execMin;
+                if (cmp.jobObj.execution_time_min !== undefined) cmp.jobObj.execution_time_min = execMin;
+                cmp.dbxData = data; // replace dbxData as well so everything stays in sync
+            }
+        }
+        
     } catch (e) {
         cell.innerHTML = `<div class="dbx-error">⚠ ${esc(e.message)}</div>`;
     }
@@ -782,4 +820,238 @@ function esc(str) {
     const div = document.createElement("div");
     div.textContent = String(str);
     return div.innerHTML;
+}
+
+// ==== COMPARISON FEATURE ====================================
+
+function toggleCompareCheck(cb, jobIdStr) {
+    const jobId = String(jobIdStr);
+    if (cb.checked) {
+        if (selectedCompareJobs.length >= 4) {
+            alert("You can only compare up to 4 jobs at a time.");
+            cb.checked = false;
+            return;
+        }
+        
+        let jobObj = null;
+        let flowName = "Unknown Flow";
+        let dbxId = null;
+        
+        // Search all_jobs global array
+        if (typeof _ajJobs !== 'undefined') {
+            const found = _ajJobs.find(j => String(j.job_id) === jobId);
+            if (found) {
+                jobObj = found;
+                flowName = found.flow_name || "Unknown Flow";
+                dbxId = found.databricks_job_id;
+            }
+        }
+        
+        // Search flow analysis global array
+        if (!jobObj && typeof flows !== 'undefined') {
+            for (const f of flows) {
+                // If it's a flow object, navigate its pairs
+                if (f.pairs) {
+                    for (const p of f.pairs) {
+                        const aac = p.aac;
+                        const onp = p.onprem;
+                        if (aac && (String(aac.jobRunId) === jobId || String(aac.jobGroupId) === jobId || String(aac.job_id) === jobId)) {
+                            jobObj = aac;
+                            flowName = aac.flowName || f.name;
+                            dbxId = aac.databricksJobId;
+                            break;
+                        }
+                        if (onp && (String(onp.jobRunId) === jobId || String(onp.jobGroupId) === jobId || String(onp.job_id) === jobId)) {
+                            jobObj = onp;
+                            flowName = onp.flowName || f.name;
+                            dbxId = onp.databricksJobId;
+                            break;
+                        }
+                    }
+                }
+                if (jobObj) break;
+            }
+        }
+        
+        selectedCompareJobs.push({
+            jobId: jobId,
+            flowName: flowName,
+            dbxId: dbxId,
+            jobObj: jobObj
+        });
+    } else {
+        selectedCompareJobs = selectedCompareJobs.filter(c => c.jobId !== jobId);
+    }
+    
+    updateCompareButtons();
+}
+
+function updateCompareButtons() {
+    const count = selectedCompareJobs.length;
+    const ajBtn = document.getElementById("ajCompareBtn");
+    const faBtn = document.getElementById("faCompareBtn");
+    const ajCount = document.getElementById("ajCompareCount");
+    const faCount = document.getElementById("faCompareCount");
+    
+    if (ajBtn) ajBtn.style.display = count > 0 ? "inline-flex" : "none";
+    if (faBtn) faBtn.style.display = count > 0 ? "inline-flex" : "none";
+    if (ajCount) ajCount.textContent = count;
+    if (faCount) faCount.textContent = count;
+    
+    // Sync checkboxes across both views
+    document.querySelectorAll('.compare-cb').forEach(cb => {
+        cb.checked = selectedCompareJobs.some(c => c.jobId === cb.value);
+    });
+}
+
+function closeCompareModal() {
+    document.getElementById("compareModal").style.display = "none";
+}
+document.getElementById("compareClose")?.addEventListener("click", closeCompareModal);
+
+async function openCompareModal() {
+    if (selectedCompareJobs.length === 0) return;
+    const modal = document.getElementById("compareModal");
+    const body = document.getElementById("compareBody");
+    modal.style.display = "flex";
+    body.innerHTML = `<div class="loading" style="margin-top:40px;"><div class="spinner"></div><span>Loading comparison data...</span></div>`;
+    
+    // Auto-fetch missing DBX data
+    for (let i = 0; i < selectedCompareJobs.length; i++) {
+        const item = selectedCompareJobs[i];
+        if (item.dbxId && !item.dbxData) {
+            try {
+                const resp = await fetch(`${API_BASE}/api/databricks`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ databricksJobId: item.dbxId, flowName: item.flowName, jobRunId: item.jobId }),
+                });
+                const data = await resp.json();
+                if (!data.error) {
+                    item.dbxData = data;
+                }
+            } catch(e) { console.error("Auto fetch dbx error:", e); }
+        }
+    }
+    
+    // Prepare rows for comparison
+    const rows = [
+        { label: "Job Run ID", getter: j => j.jobId },
+        { label: "Flow Name", getter: j => j.flowName },
+        { label: "Status", getter: j => j.jobObj?.status || "—" },
+        { label: "Created At", getter: j => formatDateTime(j.jobObj?.created_at || j.jobObj?.createdAt) },
+        { label: "Exec Time", getter: j => {
+            let val = j.jobObj?.execution_time_min ?? j.jobObj?.executionTimeMinutes;
+            return val != null ? val.toFixed(1) + " min" : "—";
+        }}
+    ];
+    
+    // Add DBX specific rows if at least one DBX job exists
+    const hasDbx = selectedCompareJobs.some(j => j.dbxData);
+    if (hasDbx) {
+        rows.push({ label: "DBX Job ID", getter: j => j.dbxData?.clusterId ? (j.dbxData?.databricksJobId || j.dbxId || "—") : "—" });
+        rows.push({ label: "Cluster", getter: j => j.dbxData?.runDetails?.clusterId || "—" });
+        rows.push({ label: "Workers", getter: j => {
+            const a = j.dbxData?.runDetails?.autoscale;
+            return a ? `${a.minWorkers}–${a.maxWorkers}` : "—";
+        }});
+        rows.push({ label: "Node Type", getter: j => j.dbxData?.runDetails?.nodeTypeId || "—" });
+        rows.push({ label: "Cores", getter: j => j.dbxData?.runDetails?.numCores || "—" });
+        rows.push({ label: "Memory", getter: j => j.dbxData?.runDetails?.memoryMb ? fmtBytes(j.dbxData.runDetails.memoryMb * 1024 * 1024) : "—" });
+        rows.push({ label: "Setup", getter: j => fmtDurationMs(j.dbxData?.runDetails?.timing?.setupDurationMs) || "—" });
+        rows.push({ label: "Execution", getter: j => fmtDurationMs(j.dbxData?.runDetails?.timing?.executionDurationMs) || "—" });
+        
+        let totalGetter = j => {
+            const setupMs = j.dbxData?.runDetails?.timing?.setupDurationMs;
+            const execMs = j.dbxData?.runDetails?.timing?.executionDurationMs;
+            const totalMs = (setupMs != null && execMs != null) ? setupMs + execMs : null;
+            return fmtDurationMs(totalMs) || "—";
+        };
+        rows.push({ label: "Total", getter: totalGetter, isTotal: true });
+    }
+    
+    // Gather all distinct spark configs
+    const allSparkKeys = new Set();
+    selectedCompareJobs.forEach(j => {
+        if (j.dbxData?.runDetails?.sparkConf) {
+            Object.keys(j.dbxData.runDetails.sparkConf).forEach(k => allSparkKeys.add(k));
+        }
+    });
+    const sortedSparkKeys = Array.from(allSparkKeys).sort();
+    
+    let html = `<div class="compare-grid">`;
+    
+    // Render columns
+    for (let i = 0; i < selectedCompareJobs.length; i++) {
+        const item = selectedCompareJobs[i];
+        
+        html += `<div class="compare-col">
+            <div class="compare-header">
+                <h4>Job: ${esc(item.jobId)}</h4>
+                <button class="btn-secondary" style="padding:4px 8px; font-size: 0.75rem;" onclick="removeCompareJob('${item.jobId}')">Remove</button>
+            </div>
+            <div class="compare-info-col">`;
+            
+        // Basic & DBX Info
+        for (const r of rows) {
+            const val = String(r.getter(item));
+            // Check if this row differs across jobs
+            const allVals = selectedCompareJobs.map(sj => String(r.getter(sj)));
+            const isDiff = new Set(allVals).size > 1;
+            
+            let classes = "dbx-tag";
+            if (r.isTotal) classes += " dbx-tag-total";
+            if (isDiff) classes += " compare-highlight-tag";
+            
+            html += `<span class="${classes}">
+                ${esc(r.label)}: <strong>${val}</strong>
+            </span>`;
+        }
+        html += `</div>`; // .compare-info-col
+        
+        // Spark Configs
+        if (sortedSparkKeys.length > 0) {
+            html += `<div class="dbx-section-label" style="margin-top:20px;">Spark Configuration</div>`;
+            html += `<div class="dbx-conf-body" style="display:block; max-height:none; overflow:visible; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);">`;
+            html += `<table class="dbx-conf-table" style="width:100%"><tbody>`;
+            
+            for (const key of sortedSparkKeys) {
+                const confMap = item.dbxData?.runDetails?.sparkConf || {};
+                const val = confMap[key] != null ? String(confMap[key]) : "—";
+                
+                // Diff check
+                const allVals = selectedCompareJobs.map(sj => {
+                    const sc = sj.dbxData?.runDetails?.sparkConf || {};
+                    return sc[key] != null ? String(sc[key]) : "—";
+                });
+                const isDiff = new Set(allVals).size > 1;
+                const diffClass = isDiff ? 'compare-highlight-row' : '';
+                
+                html += `<tr class="${diffClass}"><td class="dbx-conf-key">${esc(key)}</td><td class="dbx-conf-val"><code>${esc(val)}</code></td></tr>`;
+            }
+            html += `</tbody></table></div>`;
+        }
+        
+        html += `</div>`; // col
+    }
+    
+    html += `</div>`; // grid
+    
+    body.innerHTML = html;
+}
+
+function removeCompareJob(jobId) {
+    selectedCompareJobs = selectedCompareJobs.filter(c => c.jobId !== jobId);
+    updateCompareButtons();
+    if (selectedCompareJobs.length === 0) {
+        closeCompareModal();
+    } else {
+        openCompareModal(); // Re-render
+    }
+}
+
+function clearCompareSelection(event) {
+    event.stopPropagation();
+    selectedCompareJobs = [];
+    updateCompareButtons();
 }
