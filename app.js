@@ -55,7 +55,9 @@ settingsModal.addEventListener("click", (e) => {
 });
 
 // Load saved flows on startup
-loadSavedFlows();
+// The Flow Analysis panel was removed; keep this guard so the shared DBX
+// panel helpers in this file still load cleanly without that DOM.
+if (sidebar) loadSavedFlows();
 
 // Initialize All Jobs tab
 ajInit();

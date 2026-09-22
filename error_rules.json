@@ -1,0 +1,235 @@
+{
+  "_comment": "Ordered failure-classification rules. First match wins. Derived from 600 enriched failures sampled across 14 days on the IQVIA tenant (Sept 2026). Each rule matches on any of: exceptionType, exceptionLabel, a regex over details.why, or a regex over the raw message. Add new rules ABOVE 'upstream_cascade'; anything unmatched lands in 'unclassified' and is surfaced on the dashboard so the gap stays visible.",
+  "rules": [
+    {
+      "id": "credentials_expired",
+      "title": "Connection credential expired",
+      "category": "Credentials",
+      "hint": "The OAuth refresh token for the source connection is no longer valid. Reauthorize the connection in AAC.",
+      "message_regex": "invalid_grant|Unable to refresh access token|provided grant or refresh token is invalid"
+    },
+    {
+      "id": "source_permissions",
+      "title": "Source/target permission denied",
+      "category": "Permissions",
+      "hint": "The connection's database user lacks privileges on the object. Check grants in the source system.",
+      "exception_type": [
+        "JdbcPermissionDeniedException",
+        "DestinationPermissionDenied",
+        "AccessControlException"
+      ],
+      "why_regex": "Insufficient privileges|SQL access control error|permission denied"
+    },
+    {
+      "id": "dataset_access",
+      "title": "Dataset access lost",
+      "category": "Permissions",
+      "hint": "The job references a dataset the running user can no longer access. Re-share the dataset or fix ownership.",
+      "exception_type": [
+        "DataSetAccessNotFoundException",
+        "DataSourceNotFoundException",
+        "DataNotFoundException"
+      ],
+      "message_regex": "DataSetAccessNotFoundException"
+    },
+    {
+      "id": "schema_column_mismatch",
+      "title": "Output schema mismatch",
+      "category": "Data / Schema",
+      "hint": "The recipe produces a different column count than the target table expects. Align the output or update the table.",
+      "why_regex": "Insert value list does not match column list"
+    },
+    {
+      "id": "sql_compilation",
+      "title": "SQL compilation error",
+      "category": "Data / Schema",
+      "hint": "The generated SQL was rejected by the target. Usually a type or identifier problem in the publish step.",
+      "why_regex": "SQL compilation error"
+    },
+    {
+      "id": "schema_unsupported",
+      "title": "Unsupported schema operation",
+      "category": "Data / Schema",
+      "hint": "Schema management could not apply the required change to the target.",
+      "exception_type": [
+        "SchemaManagementServiceUnsupportedException",
+        "InvalidDDLException"
+      ]
+    },
+    {
+      "id": "spark_oom",
+      "title": "Spark out of memory",
+      "category": "Resources",
+      "hint": "The Databricks executor ran out of memory. Review partitioning or cluster sizing for this flow.",
+      "exception_label": [
+        "spark-oom-error"
+      ],
+      "message_regex": "OutOfMemoryError"
+    },
+    {
+      "id": "job_timeout",
+      "title": "Job exceeded maximum runtime",
+      "category": "Resources",
+      "hint": "The job hit the platform runtime ceiling. Often an upstream hang rather than genuine long work.",
+      "exception_type": [
+        "JobTimeOutError"
+      ],
+      "why_regex": "not received during maximum runtime|timed out"
+    },
+    {
+      "id": "quota_exceeded",
+      "title": "Compute quota exceeded",
+      "category": "Resources",
+      "hint": "The workspace hit a compute quota. Concurrency or cluster limits need review.",
+      "exception_type": [
+        "ComputeQuotaExceededException"
+      ]
+    },
+    {
+      "id": "ssh_tunnel",
+      "title": "SSH tunnel failure",
+      "category": "Connectivity",
+      "hint": "The SSH tunnel to the source host could not be established. Check the tunnel host and key configuration.",
+      "exception_type": [
+        "InvalidSshConfigurationException"
+      ],
+      "why_regex": "ssh tunnel|SSH configuration"
+    },
+    {
+      "id": "socket_timeout",
+      "title": "Source connection timed out",
+      "category": "Connectivity",
+      "hint": "The source system did not respond in time. Often transient; check source load if it repeats.",
+      "exception_type": [
+        "SocketTimeoutException"
+      ],
+      "why_regex": "Connection refused|ECONNREFUSED|connection timed out"
+    },
+    {
+      "id": "k8s_launch",
+      "title": "Platform could not launch job",
+      "category": "Platform",
+      "hint": "The platform failed to submit the job to its Kubernetes cluster. This is an AAC-side fault worth raising with Alteryx.",
+      "exception_type": [
+        "KubernetesJobLaunchException"
+      ],
+      "why_regex": "launching K8 job|submitting data-system job to kubernetes"
+    },
+    {
+      "id": "recipe_parse",
+      "title": "Recipe parse error",
+      "category": "Recipe",
+      "hint": "A step in the recipe could not be parsed or compiled. The flow needs editing.",
+      "exception_type": [
+        "LexicalParseException",
+        "ColumnException",
+        "JobWithRecipeErrorsException",
+        "ValidationFailed"
+      ]
+    },
+    {
+      "id": "databricks_runtime",
+      "title": "Databricks run failed",
+      "category": "Spark",
+      "hint": "The Spark run failed on Databricks without a more specific cause. Pull the event log for detail.",
+      "exception_type": [
+        "DatabricksJobFailed",
+        "DatabricksSqlJobFailed"
+      ],
+      "exception_label": [
+        "general-databricks-job-runtime-failure"
+      ]
+    },
+    {
+      "id": "transformation_task",
+      "title": "Transformation task failed",
+      "category": "Platform",
+      "hint": "The transformation task failed inside the platform. Usually needs the AAC-side job id to investigate.",
+      "exception_type": [
+        "TransformationTaskException"
+      ]
+    },
+    {
+      "id": "datetime_leaf_type",
+      "title": "Unresolved Datetime column type",
+      "category": "Recipe",
+      "hint": "A column is typed as the abstract 'Datetime' rather than a concrete format (e.g. yyyy-MM-dd), which the CDF compiler cannot resolve. Set an explicit datetime format on the offending column in the recipe.",
+      "message_regex": "Could not find leaf datetime type"
+    },
+    {
+      "id": "connection_pool_timeout",
+      "title": "Connection pool exhausted",
+      "category": "Connectivity",
+      "hint": "The platform timed out waiting for a JDBC connection from the pool. Usually source-side load or too much concurrency.",
+      "message_regex": "timed out while waiting to acquire a resource|BasicResourcePool"
+    },
+    {
+      "id": "jdbc_connect_failed",
+      "title": "Cannot connect to source database",
+      "category": "Connectivity",
+      "hint": "The database refused or could not resolve the connection. Check host, service name and network path.",
+      "exception_type": [
+        "JdbcConnectionException",
+        "UnknownJdbcException"
+      ],
+      "message_regex": "ORA-\\d+|Could not connect to host|Cannot connect to database"
+    },
+    {
+      "id": "filesystem_error",
+      "title": "Storage read/write error",
+      "category": "Connectivity",
+      "hint": "The job could not read or write the storage path. Check the container path and the credential behind it.",
+      "exception_type": [
+        "IOException"
+      ],
+      "exception_label": [
+        "general-filesystem-exception"
+      ],
+      "message_regex": "abfss://|s3a://|gs://"
+    },
+    {
+      "id": "job_terminated",
+      "title": "Job terminated by the platform",
+      "category": "Platform",
+      "hint": "The job sidecar received SIGTERM \u2014 the platform stopped the job rather than the job failing on its own.",
+      "exception_type": [
+        "JobTerminated"
+      ],
+      "message_regex": "received SIGTERM"
+    },
+    {
+      "id": "planning_stale",
+      "title": "Planning stalled \u2014 no workload submitted",
+      "category": "Platform",
+      "hint": "The planner never submitted a workload before giving up. An AAC-side fault worth raising with Alteryx.",
+      "exception_type": [
+        "QueueDrainFailure"
+      ],
+      "message_regex": "Planning stale|Error creating jobs with JPL"
+    },
+    {
+      "id": "no_error_detail",
+      "title": "No error detail from platform",
+      "category": "Unclassified",
+      "hint": "The job group failed but AAC attached no error message. Platform-side hiding or an incomplete record.",
+      "exception_type": [
+        "unknownJobFailureException"
+      ]
+    },
+    {
+      "id": "upstream_cascade",
+      "title": "Failed because an upstream job failed",
+      "category": "Cascade",
+      "hint": "Not a root cause \u2014 an earlier stage in the same job group failed. Look at that stage instead.",
+      "exception_type": [
+        "UpstreamJobFailed"
+      ]
+    }
+  ],
+  "unclassified": {
+    "id": "unclassified",
+    "title": "Unclassified",
+    "category": "Unclassified",
+    "hint": "No rule matched yet. Open a few of these and add a rule to error_rules.json."
+  }
+}

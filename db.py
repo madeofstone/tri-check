@@ -68,7 +68,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     databricks_job_definition_id TEXT,
     databricks_service_url TEXT,
     source          TEXT DEFAULT 'aacp',
-    fetched_at      TEXT
+    fetched_at      TEXT,
+    -- Failure analysis (populated by the enrichment pass, failures only)
+    failure_stage   TEXT,
+    error_rule      TEXT,
+    error_title     TEXT,
+    error_category  TEXT,
+    error_type      TEXT,
+    error_label     TEXT,
+    error_code      INTEGER,
+    error_why       TEXT,
+    error_detail    TEXT,
+    error_message_id INTEGER,
+    enriched_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
@@ -87,6 +99,12 @@ CREATE TABLE IF NOT EXISTS flows (
     last_fetched    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS sync_state (
+    key             TEXT PRIMARY KEY,
+    value           TEXT,
+    updated_at      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS dbx_cache (
     flow_name       TEXT,
     job_run_id      TEXT,
@@ -102,6 +120,17 @@ CREATE TABLE IF NOT EXISTS dbx_cache (
 MIGRATIONS = [
     ("jobs", "databricks_job_definition_id", "TEXT"),
     ("jobs", "databricks_service_url", "TEXT"),
+    ("jobs", "failure_stage", "TEXT"),
+    ("jobs", "error_rule", "TEXT"),
+    ("jobs", "error_title", "TEXT"),
+    ("jobs", "error_category", "TEXT"),
+    ("jobs", "error_type", "TEXT"),
+    ("jobs", "error_label", "TEXT"),
+    ("jobs", "error_code", "INTEGER"),
+    ("jobs", "error_why", "TEXT"),
+    ("jobs", "error_detail", "TEXT"),
+    ("jobs", "error_message_id", "INTEGER"),
+    ("jobs", "enriched_at", "TEXT"),
 ]
 
 
@@ -116,11 +145,21 @@ def _apply_migrations(conn):
             log.info(f"Migrated {table}: added column {column}")
 
 
+# Indexes that cover migrated columns — created after the ALTER TABLEs so they
+# also apply to databases upgraded from an older build.
+POST_MIGRATION_SQL = """
+CREATE INDEX IF NOT EXISTS idx_jobs_error_rule ON jobs(error_rule);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_enriched ON jobs(status, enriched_at);
+"""
+
+
 def init_db():
     """Initialize the database schema."""
     with get_db() as conn:
         conn.executescript(SCHEMA_SQL)
         _apply_migrations(conn)
+        conn.executescript(POST_MIGRATION_SQL)
     log.info(f"Database initialized at {DB_PATH}")
 
 
@@ -217,6 +256,13 @@ def get_jobs(
         if filters.get("days"):
             where_clauses.append("created_at >= datetime('now', ?)")
             params.append(f"-{filters['days']} days")
+        if filters.get("created_since"):
+            where_clauses.append("created_at >= ?")
+            params.append(filters["created_since"])
+        for col in ("error_rule", "error_category", "failure_stage"):
+            if filters.get(col):
+                where_clauses.append(f"{col} = ?")
+                params.append(filters[col])
         if filters.get("search"):
             search = f"%{filters['search']}%"
             where_clauses.append(
@@ -288,6 +334,13 @@ def get_jobs_grouped_by_flow(
         if filters.get("days"):
             where_clauses.append("created_at >= datetime('now', ?)")
             params.append(f"-{filters['days']} days")
+        if filters.get("created_since"):
+            where_clauses.append("created_at >= ?")
+            params.append(filters["created_since"])
+        for col in ("error_rule", "error_category", "failure_stage"):
+            if filters.get(col):
+                where_clauses.append(f"{col} = ?")
+                params.append(filters[col])
 
     where = " AND ".join(where_clauses)
 
@@ -651,3 +704,187 @@ def migrate_from_files():
 
     if migrated > 0:
         log.info(f"Migrated {migrated} flows from files to SQLite")
+
+
+# ---------------------------------------------------------------------------
+# Sync bookkeeping
+# ---------------------------------------------------------------------------
+
+def get_sync_state(key: str, default=None):
+    """Read a value from the sync_state key/value table."""
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_sync_state(key: str, value: str):
+    """Write a value to the sync_state key/value table."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, str(value), now),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Failure enrichment
+# ---------------------------------------------------------------------------
+
+def failures_needing_enrichment(limit: int = 200, source: str = "aacp") -> list[int]:
+    """Job ids of stored failures that have not been enriched with error detail yet."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT job_id FROM jobs WHERE source = ? AND status = 'Failed' AND enriched_at IS NULL "
+            "ORDER BY created_at DESC LIMIT ?",
+            (source, limit),
+        ).fetchall()
+    return [r["job_id"] for r in rows]
+
+
+def save_failure_details(job_id: int, details: dict):
+    """Store the root failure stage and classified error for one job group."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        conn.execute("""
+            UPDATE jobs SET
+                failure_stage = ?, error_rule = ?, error_title = ?, error_category = ?,
+                error_type = ?, error_label = ?, error_code = ?, error_why = ?,
+                error_detail = ?, error_message_id = ?, enriched_at = ?
+            WHERE job_id = ?
+        """, (
+            details.get("failureStage"), details.get("ruleId"), details.get("title"),
+            details.get("category"), details.get("exceptionType"), details.get("exceptionLabel"),
+            details.get("errorCode"), details.get("why"), details.get("detail"),
+            details.get("errorMessageId"), now, int(job_id),
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Dashboard aggregates
+# ---------------------------------------------------------------------------
+
+# created_at is always '2026-09-22T10:46:00.000Z', so window filters and time
+# bucketing are plain string operations — no date parsing, no timezone drift.
+def _bucket_expr(minutes: int) -> str:
+    if minutes >= 1440:
+        return "substr(created_at, 1, 10)"                     # day
+    if minutes >= 60:
+        return "substr(created_at, 1, 13) || ':00'"            # hour
+    return (f"substr(created_at, 1, 14) || printf('%02d', "
+            f"(CAST(substr(created_at, 15, 2) AS INTEGER) / {minutes}) * {minutes})")
+
+
+def dashboard_summary(since: str, source: str = "aacp") -> dict:
+    """Headline counters for a window: volume, outcome split, reach."""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) AS total,
+                   SUM(status = 'Complete') AS complete,
+                   SUM(status = 'Failed') AS failed,
+                   SUM(status = 'Canceled') AS canceled,
+                   SUM(status IN ('InProgress', 'Created')) AS running,
+                   COUNT(DISTINCT flow_id) AS flows,
+                   COUNT(DISTINCT creator_email) AS users,
+                   SUM(CASE WHEN status = 'Failed' THEN execution_time_min ELSE 0 END) AS failed_minutes
+            FROM jobs WHERE source = ? AND created_at >= ?
+        """, (source, since)).fetchone()
+    d = {k: (row[k] or 0) for k in row.keys()}
+    finished = d["complete"] + d["failed"] + d["canceled"]
+    d["failureRate"] = round(100.0 * d["failed"] / finished, 1) if finished else 0.0
+    d["wastedHours"] = round((d["failed_minutes"] or 0) / 60.0, 1)
+    return d
+
+
+def dashboard_timeseries(since: str, bucket_minutes: int, source: str = "aacp") -> list[dict]:
+    """Per-bucket run counts split by outcome, for the trend chart."""
+    expr = _bucket_expr(bucket_minutes)
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT {expr} AS bucket,
+                   COUNT(*) AS total,
+                   SUM(status = 'Complete') AS complete,
+                   SUM(status = 'Failed') AS failed,
+                   SUM(status = 'Canceled') AS canceled
+            FROM jobs WHERE source = ? AND created_at >= ?
+            GROUP BY bucket ORDER BY bucket
+        """, (source, since)).fetchall()
+    return [{k: (r[k] or 0) for k in r.keys()} for r in rows]
+
+
+def _breakdown(column: str, since: str, source: str, limit: int, where_extra: str = "") -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT COALESCE({column}, '(unknown)') AS name, COUNT(*) AS count
+            FROM jobs
+            WHERE source = ? AND created_at >= ? AND status = 'Failed' {where_extra}
+            GROUP BY name ORDER BY count DESC LIMIT ?
+        """, (source, since, limit)).fetchall()
+    return [{"name": r["name"], "count": r["count"]} for r in rows]
+
+
+def failure_stage_breakdown(since: str, source: str = "aacp", limit: int = 20) -> list[dict]:
+    """Which pipeline stage actually failed (cascades already collapsed at enrichment)."""
+    return _breakdown("failure_stage", since, source, limit)
+
+
+def error_category_breakdown(since: str, source: str = "aacp", limit: int = 20) -> list[dict]:
+    return _breakdown("error_category", since, source, limit)
+
+
+def error_rule_breakdown(since: str, source: str = "aacp", limit: int = 20) -> list[dict]:
+    """Specific causes, with the human-readable title carried along."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT COALESCE(error_rule, 'pending') AS rule,
+                   COALESCE(error_title, 'Not yet enriched') AS title,
+                   COALESCE(error_category, 'Pending') AS category,
+                   COUNT(*) AS count
+            FROM jobs
+            WHERE source = ? AND created_at >= ? AND status = 'Failed'
+            GROUP BY rule, title, category ORDER BY count DESC LIMIT ?
+        """, (source, since, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def top_failing_flows(since: str, source: str = "aacp", limit: int = 10) -> list[dict]:
+    """Repeat offenders — flows that fail over and over in the window."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT flow_id, COALESCE(flow_name, '(unknown)') AS flow_name,
+                   COUNT(*) AS failures,
+                   COUNT(DISTINCT COALESCE(error_rule, 'pending')) AS distinct_causes,
+                   MAX(COALESCE(error_title, '')) AS sample_cause,
+                   MAX(created_at) AS last_failure
+            FROM jobs
+            WHERE source = ? AND created_at >= ? AND status = 'Failed'
+            GROUP BY flow_id, flow_name ORDER BY failures DESC LIMIT ?
+        """, (source, since, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def top_failing_users(since: str, source: str = "aacp", limit: int = 10) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT COALESCE(creator_email, '(unknown)') AS creator_email,
+                   COUNT(*) AS failures,
+                   COUNT(DISTINCT flow_id) AS flows
+            FROM jobs
+            WHERE source = ? AND created_at >= ? AND status = 'Failed'
+            GROUP BY creator_email ORDER BY failures DESC LIMIT ?
+        """, (source, since, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def ran_from_breakdown(since: str, source: str = "aacp") -> list[dict]:
+    """How jobs were triggered (api / schedule / ui), with their failure counts."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT COALESCE(ran_from, '(unknown)') AS name,
+                   COUNT(*) AS total,
+                   SUM(status = 'Failed') AS failed
+            FROM jobs WHERE source = ? AND created_at >= ?
+            GROUP BY name ORDER BY total DESC
+        """, (source, since)).fetchall()
+    return [{k: (r[k] or 0) if k != "name" else r[k] for k in r.keys()} for r in rows]

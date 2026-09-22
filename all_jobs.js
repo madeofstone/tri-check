@@ -24,17 +24,19 @@ function switchTab(tab) {
     document.querySelector(`.topbar-tab[data-tab="${tab}"]`)?.classList.add("active");
 
     // Toggle panel visibility via class (CSS handles display)
-    const allJobsPanel = document.getElementById("tabAllJobs");
-    const flowPanel = document.getElementById("tabFlowAnalysis");
-
-    allJobsPanel.classList.toggle("active", tab === "allJobs");
-    allJobsPanel.style.display = "";  // clear any inline style
-    flowPanel.classList.toggle("active", tab === "flowAnalysis");
-    flowPanel.style.display = "";     // clear any inline style
+    const panels = { dashboard: "tabDashboard", allJobs: "tabAllJobs" };
+    Object.entries(panels).forEach(([name, id]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.classList.toggle("active", tab === name);
+        el.style.display = "";  // clear any inline style
+    });
 
     if (tab === "allJobs") {
         ajLoadKpis();
         ajQueryJobs();
+    } else if (tab === "dashboard") {
+        ovLoad();
     }
 }
 

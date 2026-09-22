@@ -24,6 +24,7 @@ from databricks_client import DatabricksClient, DatabricksClientError
 from dbfs_eventlog import download_eventlog, EventLogError
 import flow_store  # kept for eventlog_dir and list_analyzed_jobs (file-based)
 import db
+import aac_sync
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)
@@ -799,6 +800,71 @@ def query_all_jobs():
         "limit": limit,
         "hasMore": offset + limit < total,
     })
+
+
+# ---------------------------------------------------------------------------
+# Dashboard API
+# ---------------------------------------------------------------------------
+
+WINDOWS = ("1h", "6h", "24h", "7d", "14d")
+
+
+@app.route("/api/dashboard", methods=["GET"])
+def dashboard():
+    """Everything the Dashboard tab needs for one time window, in one call."""
+    window = request.args.get("window", "24h")
+    if window not in WINDOWS:
+        return jsonify({"error": f"window must be one of {', '.join(WINDOWS)}"}), 400
+
+    since = aac_sync.window_since(window)
+    return jsonify({
+        "window": window,
+        "since": since,
+        "summary": db.dashboard_summary(since),
+        "timeseries": db.dashboard_timeseries(since, aac_sync.bucket_minutes(window)),
+        "bucketMinutes": aac_sync.bucket_minutes(window),
+        "failureStages": db.failure_stage_breakdown(since),
+        "errorCategories": db.error_category_breakdown(since),
+        "errorRules": db.error_rule_breakdown(since),
+        "topFlows": db.top_failing_flows(since),
+        "topUsers": db.top_failing_users(since),
+        "ranFrom": db.ran_from_breakdown(since),
+        "sync": aac_sync.get_status(),
+    })
+
+
+@app.route("/api/sync", methods=["POST"])
+def start_sync():
+    """Kick off a background sync. `full=true` re-walks the whole retention window."""
+    body = request.get_json(silent=True) or {}
+    result = aac_sync.run_sync(full=bool(body.get("full")))
+    return jsonify({**result, "status": aac_sync.get_status()})
+
+
+@app.route("/api/sync/status", methods=["GET"])
+def sync_status():
+    return jsonify(aac_sync.get_status())
+
+
+@app.route("/api/failures", methods=["GET"])
+def list_failures():
+    """Failed job groups in a window, optionally narrowed to one cause or flow."""
+    window = request.args.get("window", "24h")
+    if window not in WINDOWS:
+        return jsonify({"error": f"window must be one of {', '.join(WINDOWS)}"}), 400
+
+    filters = {"status": "Failed", "created_since": aac_sync.window_since(window)}
+    for key in ("error_rule", "error_category", "failure_stage", "flow_id", "creator_email"):
+        val = request.args.get(key, "").strip()
+        if val:
+            filters[key] = val
+
+    jobs, total = db.get_jobs(
+        filters=filters,
+        offset=request.args.get("offset", 0, type=int),
+        limit=request.args.get("limit", 50, type=int),
+    )
+    return jsonify({"jobs": jobs, "total": total, "window": window})
 
 
 @app.route("/api/all-jobs/kpis", methods=["GET"])

@@ -1,0 +1,134 @@
+/* ===== Dashboard tab ===== */
+
+#tabDashboard { display: none; }
+#tabDashboard.active { display: block; }
+
+.ov-wrap {
+    padding: 20px 24px 40px;
+    max-width: 1500px;
+    margin: 0 auto;
+    overflow-y: auto;
+    height: calc(100vh - var(--topbar-h));
+}
+
+/* Filters live in one row above the charts */
+.ov-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+}
+
+.ov-windows { display: flex; gap: 4px; background: var(--bg-secondary); padding: 4px; border-radius: var(--radius-sm); }
+
+.ov-window-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.ov-window-btn:hover { color: var(--text-primary); }
+.ov-window-btn.active { background: var(--accent-bg); color: var(--accent-hover); }
+
+.ov-sync-row { display: flex; align-items: center; gap: 12px; }
+.ov-sync-status { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+.ov-sync-status.active { color: var(--accent-hover); }
+.ov-sync-status.error { color: var(--red); }
+.spinner-sm { width: 12px; height: 12px; border-width: 2px; }
+
+/* ===== KPI tiles ===== */
+
+.ov-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.ov-kpi {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.ov-kpi-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+.ov-kpi-value { font-size: 26px; font-weight: 700; color: var(--text-primary); line-height: 1.2; }
+.ov-kpi-sub { font-size: 11px; color: var(--text-secondary); min-height: 14px; }
+.ov-kpi-good .ov-kpi-value { color: #0ca30c; }
+.ov-kpi-warn .ov-kpi-value { color: #fab219; }
+.ov-kpi-bad  .ov-kpi-value { color: #d03b3b; }
+
+/* ===== Cards ===== */
+
+.ov-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    flex: 1 1 0;
+    min-width: 0;
+}
+.ov-card-wide { margin-bottom: 16px; }
+
+.ov-row { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+
+.ov-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.ov-card-head h3 { font-size: 13px; font-weight: 600; color: var(--text-primary); margin: 0; }
+.ov-card-sub { font-size: 11px; color: var(--text-muted); }
+
+.ov-chart-box { position: relative; height: 260px; }
+.ov-chart-sm { height: 220px; }
+
+.ov-empty-sm { color: var(--text-muted); font-size: 12px; padding: 30px 0; text-align: center; }
+.ov-error { color: var(--red); background: var(--red-bg); border: 1px solid var(--red); border-radius: var(--radius); padding: 14px 16px; font-size: 13px; }
+
+/* ===== Tables ===== */
+
+.ov-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ov-table th {
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    font-weight: 600;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.ov-table td {
+    padding: 7px 8px;
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border-subtle);
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ov-table tr:last-child td { border-bottom: none; }
+.ov-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.ov-table .ov-dim { color: var(--text-muted); }
+
+.ov-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+}
+
+@media (max-width: 900px) {
+    .ov-row { flex-direction: column; }
+    .ov-wrap { padding: 16px; }
+}
