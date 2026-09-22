@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     execution_time_min REAL,
     execution_language TEXT,
     databricks_job_id TEXT,
+    databricks_job_definition_id TEXT,
+    databricks_service_url TEXT,
     source          TEXT DEFAULT 'aacp',
     fetched_at      TEXT
 );
@@ -95,10 +97,30 @@ CREATE TABLE IF NOT EXISTS dbx_cache (
 """
 
 
+# Columns added after the initial release. CREATE TABLE IF NOT EXISTS will not
+# add them to a database created by an older build, so apply them explicitly.
+MIGRATIONS = [
+    ("jobs", "databricks_job_definition_id", "TEXT"),
+    ("jobs", "databricks_service_url", "TEXT"),
+]
+
+
+def _apply_migrations(conn):
+    """Add any columns missing from an existing database."""
+    for table, column, coltype in MIGRATIONS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table not created yet; SCHEMA_SQL already has the column
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+            log.info(f"Migrated {table}: added column {column}")
+
+
 def init_db():
     """Initialize the database schema."""
     with get_db() as conn:
         conn.executescript(SCHEMA_SQL)
+        _apply_migrations(conn)
     log.info(f"Database initialized at {DB_PATH}")
 
 
@@ -120,8 +142,10 @@ def upsert_jobs(jobs: list[dict], source: str = "aacp"):
             conn.execute("""
                 INSERT INTO jobs (job_id, status, flow_id, flow_name, ran_for, ran_from,
                                   creator_email, created_at, updated_at, execution_time_min,
-                                  execution_language, databricks_job_id, source, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  execution_language, databricks_job_id,
+                                  databricks_job_definition_id, databricks_service_url,
+                                  source, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     status = excluded.status,
                     ran_for = excluded.ran_for,
@@ -129,6 +153,12 @@ def upsert_jobs(jobs: list[dict], source: str = "aacp"):
                     creator_email = excluded.creator_email,
                     updated_at = excluded.updated_at,
                     execution_time_min = excluded.execution_time_min,
+                    execution_language = COALESCE(excluded.execution_language, jobs.execution_language),
+                    databricks_job_id = COALESCE(excluded.databricks_job_id, jobs.databricks_job_id),
+                    databricks_job_definition_id = COALESCE(
+                        excluded.databricks_job_definition_id, jobs.databricks_job_definition_id),
+                    databricks_service_url = COALESCE(
+                        excluded.databricks_service_url, jobs.databricks_service_url),
                     fetched_at = excluded.fetched_at
             """, (
                 int(job_id),
@@ -143,6 +173,8 @@ def upsert_jobs(jobs: list[dict], source: str = "aacp"):
                 j.get("executionTimeMinutes"),
                 j.get("executionLanguage"),
                 j.get("databricksJobId"),
+                j.get("databricksJobDefinitionId"),
+                j.get("databricksServiceUrl"),
                 source,
                 now,
             ))
@@ -206,6 +238,19 @@ def get_jobs(
         ).fetchall()
 
     return [dict(r) for r in rows], total
+
+
+def get_job_dbx_host(job_id) -> Optional[str]:
+    """Return the Databricks workspace URL recorded for a job, if we have one."""
+    try:
+        job_id = int(job_id)
+    except (TypeError, ValueError):
+        return None
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT databricks_service_url FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+    return row["databricks_service_url"] if row else None
 
 
 def get_latest_job_id(source: str = "aacp") -> Optional[int]:

@@ -34,14 +34,10 @@ class Config:
     MATCH_STRATEGY: str = os.getenv("MATCH_STRATEGY", "time_and_name")
     
     # Databricks Settings
-    DATABRICKS_HOST: str = os.getenv("DATABRICKS_HOST", "")
+    # NOTE: the workspace URL is not configured here. It is read per-job from the
+    # AAC jobLibrary response (cpJobId.databricksServiceUrl), so we always talk to
+    # the workspace that actually ran the job. Only the PAT is configuration.
     DATABRICKS_TOKEN: str = os.getenv("DATABRICKS_TOKEN", "")
-    
-    # Job Naming Pattern
-    DATABRICKS_JOB_NAME_PREFIX: str = os.getenv(
-        "DATABRICKS_JOB_NAME_PREFIX", 
-        "AAC-Transform-Job-"
-    )
     
     # Output Settings
     DEFAULT_OUTPUT_FILE: str = os.getenv("DEFAULT_OUTPUT_FILE", "job_report.csv")
@@ -52,8 +48,6 @@ class Config:
         missing = []
         if not cls.PLATFORM_API_TOKEN:
             missing.append("PLATFORM_API_TOKEN")
-        if not cls.DATABRICKS_HOST:
-            missing.append("DATABRICKS_HOST")
         if not cls.DATABRICKS_TOKEN:
             missing.append("DATABRICKS_TOKEN")
         return missing
@@ -63,8 +57,6 @@ class Config:
         """Update configuration from CLI arguments."""
         if kwargs.get("platform_token"):
             cls.PLATFORM_API_TOKEN = kwargs["platform_token"]
-        if kwargs.get("databricks_host"):
-            cls.DATABRICKS_HOST = kwargs["databricks_host"]
         if kwargs.get("databricks_token"):
             cls.DATABRICKS_TOKEN = kwargs["databricks_token"]
         if kwargs.get("limit"):

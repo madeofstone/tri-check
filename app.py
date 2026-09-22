@@ -43,7 +43,6 @@ CONFIGURABLE_KEYS = [
     "ONPREM_ENABLED",
     "ONPREM_API_BASE_URL",
     "ONPREM_API_TOKEN",
-    "DATABRICKS_HOST",
     "DATABRICKS_TOKEN",
     "DEFAULT_LIMIT",
     "RANFOR_FILTER",
@@ -53,6 +52,37 @@ CONFIGURABLE_KEYS = [
 
 # Keys whose values should be masked when sent to the browser
 SECRET_KEYS = {"PLATFORM_API_TOKEN", "ONPREM_API_TOKEN", "DATABRICKS_TOKEN"}
+
+
+def normalize_host(url: str | None) -> str:
+    """Normalize a Databricks workspace URL (AAC returns it with a trailing slash)."""
+    if not url:
+        return ""
+    return str(url).strip().rstrip("/")
+
+
+def resolve_dbx_host(body: dict, job_run_id=None) -> str:
+    """
+    Determine which Databricks workspace to call for a job.
+
+    The workspace URL is never configured — it comes from the AAC job itself
+    (cpJobId.databricksServiceUrl), so we always query the workspace that ran
+    the job. Prefer the value the UI passed; fall back to the stored job row.
+    """
+    host = normalize_host(body.get("databricksServiceUrl"))
+    if host:
+        return host
+    if job_run_id:
+        stored = db.get_job_dbx_host(job_run_id)
+        if stored:
+            return normalize_host(stored)
+    return ""
+
+
+NO_HOST_ERROR = (
+    "No Databricks workspace URL for this job. It comes from the AAC job's "
+    "cpJobId.databricksServiceUrl — re-collect the job to pick it up."
+)
 
 
 def mask_value(value: str) -> str:
@@ -104,7 +134,6 @@ def reload_config():
     Config.PLATFORM_API_TOKEN = os.getenv("PLATFORM_API_TOKEN", "")
     Config.ONPREM_API_BASE_URL = os.getenv("ONPREM_API_BASE_URL", "")
     Config.ONPREM_API_TOKEN = os.getenv("ONPREM_API_TOKEN", "")
-    Config.DATABRICKS_HOST = os.getenv("DATABRICKS_HOST", "")
     Config.DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN", "")
     Config.DEFAULT_LIMIT = int(os.getenv("DEFAULT_LIMIT", "25"))
     Config.ONPREM_ENABLED = os.getenv("ONPREM_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -147,24 +176,38 @@ def extract_job_summary(job_data: dict) -> dict:
             flow_id = flow.get("id")
             flow_name = flow.get("name")
 
-    # The inner job details (executionLanguage, cpJobId) live inside jobs.data[0]
+    # jobs.data holds EVERY job in the group (ingest, schemadrift, wrangle,
+    # filewriter, publish). Only the "wrangle" job runs on Spark and carries the
+    # cpJobId that links back to Databricks; its position in the array varies with
+    # how many ingest/schemadrift jobs precede it, so select it by type.
     inner_job = None
     jobs_wrapper = job_data.get("jobs")
     if jobs_wrapper:
-        jobs_list = jobs_wrapper.get("data", [])
-        if jobs_list:
-            inner_job = jobs_list[0]
+        jobs_list = jobs_wrapper.get("data", []) or []
+        inner_job = next(
+            (ij for ij in jobs_list if (ij or {}).get("jobType") == "wrangle"),
+            None,
+        )
+        # Fall back to any job that carries a cpJobId, in case jobType is renamed.
+        if inner_job is None:
+            inner_job = next((ij for ij in jobs_list if (ij or {}).get("cpJobId")), None)
 
     execution_language = None
-    databricks_job_id = None
+    databricks_run_id = None
+    databricks_job_definition_id = None
+    databricks_service_url = None
     if inner_job:
         execution_language = inner_job.get("executionLanguage")
-        # Parse databricksJobId from cpJobId JSON string
+        # cpJobId is a JSON *string* describing the Databricks execution.
+        # Field naming is misleading: "databricksJobId" is the RUN id (what
+        # jobs/runs/get takes), while "databricksJobDefinitionId" is the job id.
         cp_job_id_raw = inner_job.get("cpJobId")
         if cp_job_id_raw and isinstance(cp_job_id_raw, str):
             try:
                 cp_job = json.loads(cp_job_id_raw)
-                databricks_job_id = cp_job.get("databricksJobId")
+                databricks_run_id = cp_job.get("databricksJobId")
+                databricks_job_definition_id = cp_job.get("databricksJobDefinitionId")
+                databricks_service_url = normalize_host(cp_job.get("databricksServiceUrl"))
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -194,7 +237,10 @@ def extract_job_summary(job_data: dict) -> dict:
         "updatedAt": updated_at,
         "executionTimeMinutes": compute_execution_minutes(created_at, updated_at),
         "executionLanguage": execution_language,
-        "databricksJobId": databricks_job_id,
+        # Kept as "databricksJobId" for UI/storage compatibility — it is a run id.
+        "databricksJobId": databricks_run_id,
+        "databricksJobDefinitionId": databricks_job_definition_id,
+        "databricksServiceUrl": databricks_service_url,
     }
 
 
@@ -364,11 +410,15 @@ def fetch_databricks_details():
             cached["cached"] = True
             return jsonify(cached)
 
-    if not Config.DATABRICKS_HOST or not Config.DATABRICKS_TOKEN:
-        return jsonify({"error": "DATABRICKS_HOST and DATABRICKS_TOKEN must be configured"}), 400
+    if not Config.DATABRICKS_TOKEN:
+        return jsonify({"error": "DATABRICKS_TOKEN must be configured"}), 400
+
+    host = resolve_dbx_host(body, job_run_id)
+    if not host:
+        return jsonify({"error": NO_HOST_ERROR}), 400
 
     try:
-        dbx = DatabricksClient(host=Config.DATABRICKS_HOST, token=Config.DATABRICKS_TOKEN)
+        dbx = DatabricksClient(host=host, token=Config.DATABRICKS_TOKEN)
         run_details = dbx.get_run_details(dbx_job_id)
 
         # Fetch cluster events if we got a cluster_id
@@ -382,7 +432,7 @@ def fetch_databricks_details():
 
         response_data = {
             "databricksJobId": dbx_job_id,
-            "databricksHost": Config.DATABRICKS_HOST,
+            "databricksHost": host,
             "runDetails": run_details,
             "clusterEvents": cluster_events,
             "cached": False,
@@ -413,11 +463,15 @@ def refresh_databricks_details():
         db.clear_dbx_job(flow_name, str(job_run_id))
         flow_store.clear_dbx_job(flow_name, str(job_run_id))  # also clear file-based eventlogs
 
-    if not Config.DATABRICKS_HOST or not Config.DATABRICKS_TOKEN:
-        return jsonify({"error": "DATABRICKS_HOST and DATABRICKS_TOKEN must be configured"}), 400
+    if not Config.DATABRICKS_TOKEN:
+        return jsonify({"error": "DATABRICKS_TOKEN must be configured"}), 400
+
+    host = resolve_dbx_host(body, job_run_id)
+    if not host:
+        return jsonify({"error": NO_HOST_ERROR}), 400
 
     try:
-        dbx = DatabricksClient(host=Config.DATABRICKS_HOST, token=Config.DATABRICKS_TOKEN)
+        dbx = DatabricksClient(host=host, token=Config.DATABRICKS_TOKEN)
         run_details = dbx.get_run_details(dbx_job_id)
 
         cluster_events = []
@@ -430,7 +484,7 @@ def refresh_databricks_details():
 
         response_data = {
             "databricksJobId": dbx_job_id,
-            "databricksHost": Config.DATABRICKS_HOST,
+            "databricksHost": host,
             "runDetails": run_details,
             "clusterEvents": cluster_events,
             "cached": False,
@@ -457,8 +511,12 @@ def fetch_eventlog():
         return jsonify({"error": "clusterId is required"}), 400
     if not job_run_id:
         return jsonify({"error": "jobRunId is required"}), 400
-    if not Config.DATABRICKS_HOST or not Config.DATABRICKS_TOKEN:
-        return jsonify({"error": "DATABRICKS_HOST and DATABRICKS_TOKEN must be configured"}), 400
+    if not Config.DATABRICKS_TOKEN:
+        return jsonify({"error": "DATABRICKS_TOKEN must be configured"}), 400
+
+    host = resolve_dbx_host(body, job_run_id)
+    if not host:
+        return jsonify({"error": NO_HOST_ERROR}), 400
 
     # Always store in jobs/<jobRunId>/ directory
     job_dir = LEGACY_JOBS_DIR / str(job_run_id)
@@ -473,7 +531,7 @@ def fetch_eventlog():
     # Step 1: Download event log from DBFS
     try:
         eventlog_path = download_eventlog(
-            host=Config.DATABRICKS_HOST,
+            host=host,
             token=Config.DATABRICKS_TOKEN,
             cluster_id=cluster_id,
             local_dir=str(job_dir),

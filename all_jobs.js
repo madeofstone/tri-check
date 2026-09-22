@@ -419,7 +419,7 @@ function _ajRenderFlat(jobs) {
 
     body.innerHTML = jobs.map(j => {
         const dbxBtn = j.databricks_job_id
-            ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
+            ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-dbxurl="${esc(j.databricks_service_url || "")}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
             : `<span class="cell-empty">—</span>`;
 
         const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
@@ -509,7 +509,7 @@ function _ajRenderGrouped(groups) {
         // Expanded child rows — same columns as flat view
         for (const j of g.jobs) {
             const dbxBtn = j.databricks_job_id
-                ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
+                ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-dbxurl="${esc(j.databricks_service_url || "")}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
                 : `<span class="cell-empty">—</span>`;
 
             const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
@@ -563,6 +563,7 @@ async function ajToggleDbx(btn) {
     btn.classList.add("active");
 
     const dbxId = btn.dataset.dbxid;
+    const dbxUrl = btn.dataset.dbxurl || "";
     const jobId = btn.dataset.jobid;
     const totalCols = 10;
 
@@ -575,7 +576,7 @@ async function ajToggleDbx(btn) {
         const resp = await fetch(`${API_BASE}/api/databricks`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ databricksJobId: dbxId, flowName: "", jobRunId: jobId }),
+            body: JSON.stringify({ databricksJobId: dbxId, flowName: "", jobRunId: jobId, databricksServiceUrl: dbxUrl }),
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error);

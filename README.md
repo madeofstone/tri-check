@@ -33,18 +33,20 @@ Edit `.env` with your credentials:
 | ----------------------- | ------------------------------------------------------------- |
 | `PLATFORM_API_BASE_URL` | AAC platform API URL (e.g. `https://eu1.alteryxcloud.com/v4`) |
 | `PLATFORM_API_TOKEN`    | AAC API bearer token                                          |
-| `DATABRICKS_HOST`       | Databricks workspace URL                                      |
-| `DATABRICKS_TOKEN`      | Databricks personal access token                              |
+| `DATABRICKS_TOKEN`      | Databricks PAT for the workspace that runs your AAC jobs      |
 | `ONPREM_API_BASE_URL`   | On-prem Trifacta API URL _(optional)_                         |
 | `ONPREM_API_TOKEN`      | On-prem API token _(optional)_                                |
 | `DEFAULT_LIMIT`         | Max jobs to fetch per request (default: `25`)                 |
 | `MATCH_WINDOW_MINUTES`  | Time window for pairing jobs (default: `10`)                  |
 | `RANFOR_FILTER`         | Job type filter (default: `recipe,plan`)                      |
 
+The Databricks workspace URL is deliberately not configurable. Each AAC job
+reports the workspace that ran it (`cpJobId.databricksServiceUrl`), and Tri-Tracker
+calls that workspace, so the two can never drift apart.
+
 ### 3. Run
 
 ```bash
-cd tri-track
 python app.py
 ```
 

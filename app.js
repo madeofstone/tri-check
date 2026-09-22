@@ -317,7 +317,7 @@ function renderAacCells(job, baseUrl, pairIdx) {
     if (!job) return `<td class="cell-empty">—</td>`.repeat(7);
     let dbxCell;
     if (job.executionLanguage === "databricksSpark" && job.databricksJobId) {
-        dbxCell = `<td class="dbx-cell"><button class="dbx-btn" data-pair="${pairIdx}" data-dbxid="${job.databricksJobId}" onclick="toggleDbxPanel(this)">DBX ▸</button></td>`;
+        dbxCell = `<td class="dbx-cell"><button class="dbx-btn" data-pair="${pairIdx}" data-dbxid="${job.databricksJobId}" data-dbxurl="${esc(job.databricksServiceUrl || "")}" onclick="toggleDbxPanel(this)">DBX ▸</button></td>`;
     } else {
         dbxCell = `<td class="dbx-cell"></td>`;
     }
@@ -348,6 +348,7 @@ function _jobCoreCells(job, baseUrl) {
 async function toggleDbxPanel(btn) {
     const pairIdx = btn.dataset.pair;
     const dbxId = btn.dataset.dbxid;
+    const dbxUrl = btn.dataset.dbxurl || "";
     const parentRow = btn.closest("tr");
     const existingDetail = parentRow.nextElementSibling;
 
@@ -378,7 +379,7 @@ async function toggleDbxPanel(btn) {
         const resp = await fetch(`${API_BASE}/api/databricks`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ databricksJobId: dbxId, flowName, jobRunId }),
+            body: JSON.stringify({ databricksJobId: dbxId, flowName, jobRunId, databricksServiceUrl: dbxUrl }),
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
@@ -421,7 +422,7 @@ function renderDbxPanel(data) {
     } else {
         html += `<div class="dbx-title">${title}${cachedLabel}</div>`;
     }
-    html += `<button class="dbx-refresh-btn" onclick="refreshDbxPanel(this, '${esc(data.databricksJobId || '')}', '${esc(jobRunId)}')" title="Refresh DBX data">`;
+    html += `<button class="dbx-refresh-btn" onclick="refreshDbxPanel(this, '${esc(data.databricksJobId || '')}', '${esc(jobRunId)}', '${esc(host)}')" title="Refresh DBX data">`;
     html += `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>`;
     html += ` Refresh</button>`;
     html += `</div>`;
@@ -450,7 +451,7 @@ function renderDbxPanel(data) {
             html += `<button class="dash-open-btn" onclick="viewDashboard('${esc(jobRunId)}', '${esc(flowName)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg> Dashboard</button>`;
             html += `</div></div>`;
         } else {
-            html += `<button class="eventlog-btn" onclick="downloadEventLog('${esc(clusterId)}', '${esc(jobRunId)}', '${esc(flowName)}')">`;
+            html += `<button class="eventlog-btn" onclick="downloadEventLog('${esc(clusterId)}', '${esc(jobRunId)}', '${esc(flowName)}', '${esc(host)}')">`;
             html += `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="16" height="16"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
             html += ` Download Event Log</button>`;
         }
@@ -511,7 +512,7 @@ function renderDbxPanel(data) {
 }
 
 // ---- Event Log Download -----------------------------------
-async function downloadEventLog(clusterId, jobRunId, flowName) {
+async function downloadEventLog(clusterId, jobRunId, flowName, dbxUrl) {
     const row = document.getElementById(`eventlog-row-${jobRunId}`);
     if (!row) return;
 
@@ -528,7 +529,7 @@ async function downloadEventLog(clusterId, jobRunId, flowName) {
         const resp = await fetch(`${API_BASE}/api/eventlog`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ clusterId, jobRunId, flowName }),
+            body: JSON.stringify({ clusterId, jobRunId, flowName, databricksServiceUrl: dbxUrl || "" }),
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
@@ -572,7 +573,7 @@ async function downloadEventLog(clusterId, jobRunId, flowName) {
 }
 
 // ---- Refresh DBX Panel ------------------------------------
-async function refreshDbxPanel(btn, dbxId, jobRunId) {
+async function refreshDbxPanel(btn, dbxId, jobRunId, dbxUrl) {
     const detailRow = btn.closest(".dbx-detail-row");
     if (!detailRow) return;
 
@@ -590,7 +591,7 @@ async function refreshDbxPanel(btn, dbxId, jobRunId) {
         const resp = await fetch(`${API_BASE}/api/databricks/refresh`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ databricksJobId: dbxId, flowName, jobRunId }),
+            body: JSON.stringify({ databricksJobId: dbxId, flowName, jobRunId, databricksServiceUrl: dbxUrl || "" }),
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
@@ -688,7 +689,6 @@ const SETTINGS_CONFIG = [
         { key: "ONPREM_API_TOKEN", label: "API Token", type: "password" },
     ]},
     { section: "Databricks", keys: [
-        { key: "DATABRICKS_HOST", label: "Host URL", type: "text" },
         { key: "DATABRICKS_TOKEN", label: "PAT Token", type: "password" },
     ]},
     { section: "Query Settings", keys: [
@@ -836,6 +836,7 @@ function toggleCompareCheck(cb, jobIdStr) {
         let jobObj = null;
         let flowName = "Unknown Flow";
         let dbxId = null;
+        let dbxUrl = "";
         
         // Search all_jobs global array
         if (typeof _ajJobs !== 'undefined') {
@@ -844,6 +845,7 @@ function toggleCompareCheck(cb, jobIdStr) {
                 jobObj = found;
                 flowName = found.flow_name || "Unknown Flow";
                 dbxId = found.databricks_job_id;
+                dbxUrl = found.databricks_service_url || "";
             }
         }
         
@@ -859,12 +861,14 @@ function toggleCompareCheck(cb, jobIdStr) {
                             jobObj = aac;
                             flowName = aac.flowName || f.name;
                             dbxId = aac.databricksJobId;
+                            dbxUrl = aac.databricksServiceUrl || "";
                             break;
                         }
                         if (onp && (String(onp.jobRunId) === jobId || String(onp.jobGroupId) === jobId || String(onp.job_id) === jobId)) {
                             jobObj = onp;
                             flowName = onp.flowName || f.name;
                             dbxId = onp.databricksJobId;
+                            dbxUrl = onp.databricksServiceUrl || "";
                             break;
                         }
                     }
@@ -877,6 +881,7 @@ function toggleCompareCheck(cb, jobIdStr) {
             jobId: jobId,
             flowName: flowName,
             dbxId: dbxId,
+            dbxUrl: dbxUrl,
             jobObj: jobObj
         });
     } else {
@@ -924,7 +929,7 @@ async function openCompareModal() {
                 const resp = await fetch(`${API_BASE}/api/databricks`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ databricksJobId: item.dbxId, flowName: item.flowName, jobRunId: item.jobId }),
+                    body: JSON.stringify({ databricksJobId: item.dbxId, flowName: item.flowName, jobRunId: item.jobId, databricksServiceUrl: item.dbxUrl || "" }),
                 });
                 const data = await resp.json();
                 if (!data.error) {

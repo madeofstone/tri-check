@@ -55,9 +55,16 @@ class DatabricksClient:
     """Lightweight wrapper for the Databricks SDK calls we need."""
 
     def __init__(self, host: str, token: str):
-        if not host or not token:
-            raise DatabricksClientError("DATABRICKS_HOST and DATABRICKS_TOKEN must be configured")
-        self.client = WorkspaceClient(host=host, token=token)
+        if not host:
+            raise DatabricksClientError(
+                "No Databricks workspace URL supplied — it is read per-job from the "
+                "AAC response (cpJobId.databricksServiceUrl)"
+            )
+        if not token:
+            raise DatabricksClientError("DATABRICKS_TOKEN must be configured")
+        # AAC returns the URL with a trailing slash; the SDK wants it without.
+        self.host = str(host).strip().rstrip("/")
+        self.client = WorkspaceClient(host=self.host, token=token)
 
     # ------------------------------------------------------------------ #
     #  Find latest run for a job ID
@@ -99,6 +106,14 @@ class DatabricksClient:
         try:
             run = self.client.jobs.get_run(run_id=int(run_id))
         except Exception as e:
+            # A PAT is workspace-scoped; name the workspace so a mismatch between
+            # the token and the job's workspace is obvious rather than a bare 403.
+            if "does not have" in str(e) or "permission" in str(e).lower():
+                raise DatabricksClientError(
+                    f"Databricks denied access to run {run_id} on {self.host}. "
+                    f"Check that the PAT belongs to this workspace and has at least "
+                    f"'Can View' on the job. ({e})"
+                ) from e
             raise DatabricksClientError(f"jobs.get_run({run_id}) failed: {e}") from e
 
         job_name = getattr(run, "run_name", None)
