@@ -133,3 +133,50 @@ def pick_root_failure(inner_jobs: list[dict]) -> Optional[dict]:
         if etype != "upstreamjobfailed":
             return job
     return failed[0]
+
+
+# ---------------------------------------------------------------------------
+# Message signatures
+# ---------------------------------------------------------------------------
+
+# Volatile fragments that differ between two instances of the *same* problem.
+# Removing them lets near-identical messages collapse into one drill-down row.
+_SIG_SUBS = [
+    (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I), "<uuid>"),
+    # Long opaque tokens only — the digit lookahead keeps this from eating
+    # ordinary Java class names like WorkloadExecutionException.
+    (re.compile(r"\b(?=[A-Za-z0-9+/]*\d)[A-Za-z0-9+/]{24,}={0,2}\b"), "<token>"),
+    (re.compile(r"\b(?:abfss|s3a?|gs|wasbs?|dbfs|file|https?)://\S+", re.I), "<path>"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?Z?", re.I), "<ts>"),
+    # Quoted object names: the same permission or schema fault across 40 tables
+    # is one problem to fix, not 40 rows. The real name stays in the sample text.
+    (re.compile(r"'[^']{1,120}'"), "'<name>'"),
+    (re.compile(r'"[^"]{1,120}"'), '"<name>"'),
+    (re.compile(r"\b\d+\b"), "N"),
+    (re.compile(r"\s+"), " "),
+]
+
+SIGNATURE_MAX = 200
+
+
+def signature(parsed: dict) -> str:
+    """
+    A stable key for "the same error text", used to group failures for drill-down.
+
+    Built from details.why when the platform provides it (already human-readable)
+    and the exception message otherwise, with ids, paths, tokens, timestamps and
+    numbers masked so that 500 instances of one problem collapse to one row.
+    """
+    text = (parsed.get("why") or parsed.get("message") or "").strip()
+    if not text:
+        return (parsed.get("exceptionType") or "unknown").strip()
+
+    # A raw JSON payload is all quoted strings — masking them leaves nothing
+    # readable, so key it by exception type plus a trimmed head instead.
+    if text[:1] in "{[":
+        etype = parsed.get("exceptionType") or "error"
+        return f"{etype}: {' '.join(text.split())[:120]}"[:SIGNATURE_MAX]
+
+    for pattern, replacement in _SIG_SUBS:
+        text = pattern.sub(replacement, text)
+    return text.strip()[:SIGNATURE_MAX]

@@ -14,6 +14,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -783,7 +784,8 @@ def query_all_jobs():
     group = request.args.get("group", "", type=str)
 
     filters = {}
-    for key in ("status", "flow_id", "flow_name", "creator_email", "ran_for", "search", "days"):
+    for key in ("status", "flow_id", "flow_name", "creator_email", "ran_for", "search", "days",
+                "error_rule", "error_category", "failure_stage", "error_signature"):
         val = request.args.get(key, "").strip()
         if val:
             filters[key] = val
@@ -809,28 +811,89 @@ def query_all_jobs():
 WINDOWS = ("1h", "6h", "24h", "7d", "14d")
 
 
+def _dashboard_scope(args) -> tuple[str, Optional[str], dict, dict]:
+    """
+    Resolve the requested slice of data.
+
+    A window sets the outer bounds; `from`/`to` narrow it further when the user
+    clicks a bar in the trend chart. Dimension filters (category, cause, stage,
+    flow) apply to every failure-oriented panel so the whole dashboard
+    cross-filters together.
+    """
+    window = args.get("window", "24h")
+    since = aac_sync.window_since(window)
+    until = None
+    if args.get("from"):
+        since = max(since, args["from"]) if args["from"] >= since else since
+        since = args["from"]
+    if args.get("to"):
+        until = args["to"]
+
+    filters = {}
+    for key in ("error_category", "error_rule", "failure_stage", "flow_id"):
+        val = (args.get(key) or "").strip()
+        if val:
+            filters[key] = val
+    return since, until, filters, {"window": window, "from": args.get("from"),
+                                   "to": args.get("to"), **filters}
+
+
 @app.route("/api/dashboard", methods=["GET"])
 def dashboard():
-    """Everything the Dashboard tab needs for one time window, in one call."""
+    """Everything the Dashboard tab needs for one slice of data, in one call."""
     window = request.args.get("window", "24h")
     if window not in WINDOWS:
         return jsonify({"error": f"window must be one of {', '.join(WINDOWS)}"}), 400
 
-    since = aac_sync.window_since(window)
+    since, until, filters, active = _dashboard_scope(request.args)
+    bucket = aac_sync.bucket_minutes(window)
     return jsonify({
         "window": window,
         "since": since,
-        "summary": db.dashboard_summary(since),
-        "timeseries": db.dashboard_timeseries(since, aac_sync.bucket_minutes(window)),
-        "bucketMinutes": aac_sync.bucket_minutes(window),
-        "failureStages": db.failure_stage_breakdown(since),
-        "errorCategories": db.error_category_breakdown(since),
-        "errorRules": db.error_rule_breakdown(since),
-        "topFlows": db.top_failing_flows(since),
-        "topUsers": db.top_failing_users(since),
-        "ranFrom": db.ran_from_breakdown(since),
+        "until": until,
+        "filters": active,
+        "summary": db.dashboard_summary(since, until=until, filters=filters),
+        "timeseries": db.dashboard_timeseries(since, bucket, until=until, filters=filters),
+        "bucketMinutes": bucket,
+        "failureStages": db.failure_stage_breakdown(since, until=until, filters=filters),
+        "errorCategories": db.error_category_breakdown(since, until=until, filters=filters),
+        "errorRules": db.error_rule_breakdown(since, until=until, filters=filters),
+        "errorMessages": db.error_messages(since, until=until, filters=filters, limit=25),
+        "topFlows": db.top_failing_flows(since, until=until, filters=filters),
+        "topUsers": db.top_failing_users(since, until=until, filters=filters),
+        "ranFrom": db.ran_from_breakdown(since, until=until),
         "sync": aac_sync.get_status(),
     })
+
+
+@app.route("/api/failures/message", methods=["GET"])
+def failure_message_detail():
+    """Flows and a full sample message for one error signature."""
+    signature = request.args.get("signature", "")
+    if not signature:
+        return jsonify({"error": "signature is required"}), 400
+    window = request.args.get("window", "24h")
+    if window not in WINDOWS:
+        return jsonify({"error": f"window must be one of {', '.join(WINDOWS)}"}), 400
+
+    since, until, filters, _ = _dashboard_scope(request.args)
+    rows = db.error_messages(since, until=until,
+                             filters={**filters, "error_signature": signature}, limit=1)
+    return jsonify({
+        "signature": signature,
+        "summary": rows[0] if rows else None,
+        "flows": db.signature_flows(since, signature, until=until, limit=15),
+    })
+
+
+@app.route("/api/error-rules", methods=["GET"])
+def get_error_rules():
+    """The classification rules, so the UI can show each cause's remediation hint."""
+    import classifier
+    return jsonify({"rules": [
+        {"id": r.get("id"), "title": r.get("title"), "category": r.get("category"), "hint": r.get("hint")}
+        for r in classifier.load_rules()
+    ]})
 
 
 @app.route("/api/sync", methods=["POST"])

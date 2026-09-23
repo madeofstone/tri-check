@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_why       TEXT,
     error_detail    TEXT,
     error_message_id INTEGER,
+    error_signature TEXT,
     enriched_at     TEXT
 );
 
@@ -131,6 +132,7 @@ MIGRATIONS = [
     ("jobs", "error_detail", "TEXT"),
     ("jobs", "error_message_id", "INTEGER"),
     ("jobs", "enriched_at", "TEXT"),
+    ("jobs", "error_signature", "TEXT"),
 ]
 
 
@@ -151,6 +153,7 @@ POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_jobs_error_rule ON jobs(error_rule);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_enriched ON jobs(status, enriched_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_error_signature ON jobs(error_signature);
 """
 
 
@@ -259,7 +262,7 @@ def get_jobs(
         if filters.get("created_since"):
             where_clauses.append("created_at >= ?")
             params.append(filters["created_since"])
-        for col in ("error_rule", "error_category", "failure_stage"):
+        for col in ("error_rule", "error_category", "failure_stage", "error_signature"):
             if filters.get(col):
                 where_clauses.append(f"{col} = ?")
                 params.append(filters[col])
@@ -337,7 +340,7 @@ def get_jobs_grouped_by_flow(
         if filters.get("created_since"):
             where_clauses.append("created_at >= ?")
             params.append(filters["created_since"])
-        for col in ("error_rule", "error_category", "failure_stage"):
+        for col in ("error_rule", "error_category", "failure_stage", "error_signature"):
             if filters.get(col):
                 where_clauses.append(f"{col} = ?")
                 params.append(filters[col])
@@ -751,13 +754,13 @@ def save_failure_details(job_id: int, details: dict):
             UPDATE jobs SET
                 failure_stage = ?, error_rule = ?, error_title = ?, error_category = ?,
                 error_type = ?, error_label = ?, error_code = ?, error_why = ?,
-                error_detail = ?, error_message_id = ?, enriched_at = ?
+                error_detail = ?, error_message_id = ?, error_signature = ?, enriched_at = ?
             WHERE job_id = ?
         """, (
             details.get("failureStage"), details.get("ruleId"), details.get("title"),
             details.get("category"), details.get("exceptionType"), details.get("exceptionLabel"),
             details.get("errorCode"), details.get("why"), details.get("detail"),
-            details.get("errorMessageId"), now, int(job_id),
+            details.get("errorMessageId"), details.get("signature"), now, int(job_id),
         ))
 
 
@@ -776,20 +779,52 @@ def _bucket_expr(minutes: int) -> str:
             f"(CAST(substr(created_at, 15, 2) AS INTEGER) / {minutes}) * {minutes})")
 
 
-def dashboard_summary(since: str, source: str = "aacp") -> dict:
+def _failure_scope(since: str, until: Optional[str], filters: Optional[dict],
+                   source: str) -> tuple[str, list]:
+    """Shared WHERE for the failure-oriented dashboard panels."""
+    where = ["source = ?", "created_at >= ?", "status = 'Failed'"]
+    params: list[Any] = [source, since]
+    if until:
+        where.append("created_at < ?")
+        params.append(until)
+    for col in ("error_rule", "error_category", "failure_stage", "flow_id", "error_signature"):
+        if filters and filters.get(col):
+            where.append(f"{col} = ?")
+            params.append(filters[col])
+    return " AND ".join(where), params
+
+
+def dashboard_summary(since: str, source: str = "aacp", until: Optional[str] = None,
+                      filters: Optional[dict] = None) -> dict:
     """Headline counters for a window: volume, outcome split, reach."""
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT COUNT(*) AS total,
-                   SUM(status = 'Complete') AS complete,
-                   SUM(status = 'Failed') AS failed,
-                   SUM(status = 'Canceled') AS canceled,
-                   SUM(status IN ('InProgress', 'Created')) AS running,
-                   COUNT(DISTINCT flow_id) AS flows,
-                   COUNT(DISTINCT creator_email) AS users,
-                   SUM(CASE WHEN status = 'Failed' THEN execution_time_min ELSE 0 END) AS failed_minutes
-            FROM jobs WHERE source = ? AND created_at >= ?
-        """, (source, since)).fetchone()
+    if filters:
+        # A dimension filter only makes sense against failures, so the tiles
+        # describe that subset rather than mixing in unrelated successes.
+        where, params = _failure_scope(since, until, filters, source)
+        with get_db() as conn:
+            row = conn.execute(f"""
+                SELECT COUNT(*) AS total, 0 AS complete, COUNT(*) AS failed,
+                       0 AS canceled, 0 AS running,
+                       COUNT(DISTINCT flow_id) AS flows,
+                       COUNT(DISTINCT creator_email) AS users,
+                       SUM(execution_time_min) AS failed_minutes
+                FROM jobs WHERE {where}
+            """, params).fetchone()
+    else:
+        clause = "source = ? AND created_at >= ?" + (" AND created_at < ?" if until else "")
+        params = [source, since] + ([until] if until else [])
+        with get_db() as conn:
+            row = conn.execute(f"""
+                SELECT COUNT(*) AS total,
+                       SUM(status = 'Complete') AS complete,
+                       SUM(status = 'Failed') AS failed,
+                       SUM(status = 'Canceled') AS canceled,
+                       SUM(status IN ('InProgress', 'Created')) AS running,
+                       COUNT(DISTINCT flow_id) AS flows,
+                       COUNT(DISTINCT creator_email) AS users,
+                       SUM(CASE WHEN status = 'Failed' THEN execution_time_min ELSE 0 END) AS failed_minutes
+                FROM jobs WHERE {clause}
+            """, params).fetchone()
     d = {k: (row[k] or 0) for k in row.keys()}
     finished = d["complete"] + d["failed"] + d["canceled"]
     d["failureRate"] = round(100.0 * d["failed"] / finished, 1) if finished else 0.0
@@ -797,9 +832,15 @@ def dashboard_summary(since: str, source: str = "aacp") -> dict:
     return d
 
 
-def dashboard_timeseries(since: str, bucket_minutes: int, source: str = "aacp") -> list[dict]:
+def dashboard_timeseries(since: str, bucket_minutes: int, source: str = "aacp",
+                         until: Optional[str] = None, filters: Optional[dict] = None) -> list[dict]:
     """Per-bucket run counts split by outcome, for the trend chart."""
     expr = _bucket_expr(bucket_minutes)
+    if filters:
+        where, params = _failure_scope(since, until, filters, source)
+    else:
+        where = "source = ? AND created_at >= ?" + (" AND created_at < ?" if until else "")
+        params = [source, since] + ([until] if until else [])
     with get_db() as conn:
         rows = conn.execute(f"""
             SELECT {expr} AS bucket,
@@ -807,77 +848,83 @@ def dashboard_timeseries(since: str, bucket_minutes: int, source: str = "aacp") 
                    SUM(status = 'Complete') AS complete,
                    SUM(status = 'Failed') AS failed,
                    SUM(status = 'Canceled') AS canceled
-            FROM jobs WHERE source = ? AND created_at >= ?
+            FROM jobs WHERE {where}
             GROUP BY bucket ORDER BY bucket
-        """, (source, since)).fetchall()
+        """, params).fetchall()
     return [{k: (r[k] or 0) for k in r.keys()} for r in rows]
 
 
-def _breakdown(column: str, since: str, source: str, limit: int, where_extra: str = "") -> list[dict]:
+def _breakdown(column: str, since: str, source: str, limit: int,
+               until: Optional[str] = None, filters: Optional[dict] = None) -> list[dict]:
+    where, params = _failure_scope(since, until, filters, source)
     with get_db() as conn:
         rows = conn.execute(f"""
             SELECT COALESCE({column}, '(unknown)') AS name, COUNT(*) AS count
-            FROM jobs
-            WHERE source = ? AND created_at >= ? AND status = 'Failed' {where_extra}
+            FROM jobs WHERE {where}
             GROUP BY name ORDER BY count DESC LIMIT ?
-        """, (source, since, limit)).fetchall()
+        """, params + [limit]).fetchall()
     return [{"name": r["name"], "count": r["count"]} for r in rows]
 
 
-def failure_stage_breakdown(since: str, source: str = "aacp", limit: int = 20) -> list[dict]:
+def failure_stage_breakdown(since: str, source: str = "aacp", limit: int = 20,
+                            until: Optional[str] = None, filters: Optional[dict] = None) -> list[dict]:
     """Which pipeline stage actually failed (cascades already collapsed at enrichment)."""
-    return _breakdown("failure_stage", since, source, limit)
+    return _breakdown("failure_stage", since, source, limit, until, filters)
 
 
-def error_category_breakdown(since: str, source: str = "aacp", limit: int = 20) -> list[dict]:
-    return _breakdown("error_category", since, source, limit)
+def error_category_breakdown(since: str, source: str = "aacp", limit: int = 20,
+                             until: Optional[str] = None, filters: Optional[dict] = None) -> list[dict]:
+    return _breakdown("error_category", since, source, limit, until, filters)
 
 
-def error_rule_breakdown(since: str, source: str = "aacp", limit: int = 20) -> list[dict]:
+def error_rule_breakdown(since: str, source: str = "aacp", limit: int = 20,
+                         until: Optional[str] = None, filters: Optional[dict] = None) -> list[dict]:
     """Specific causes, with the human-readable title carried along."""
+    where, params = _failure_scope(since, until, filters, source)
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT COALESCE(error_rule, 'pending') AS rule,
                    COALESCE(error_title, 'Not yet enriched') AS title,
                    COALESCE(error_category, 'Pending') AS category,
                    COUNT(*) AS count
-            FROM jobs
-            WHERE source = ? AND created_at >= ? AND status = 'Failed'
+            FROM jobs WHERE {where}
             GROUP BY rule, title, category ORDER BY count DESC LIMIT ?
-        """, (source, since, limit)).fetchall()
+        """, params + [limit]).fetchall()
     return [dict(r) for r in rows]
 
 
-def top_failing_flows(since: str, source: str = "aacp", limit: int = 10) -> list[dict]:
+def top_failing_flows(since: str, source: str = "aacp", limit: int = 10,
+                      until: Optional[str] = None, filters: Optional[dict] = None) -> list[dict]:
     """Repeat offenders — flows that fail over and over in the window."""
+    where, params = _failure_scope(since, until, filters, source)
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT flow_id, COALESCE(flow_name, '(unknown)') AS flow_name,
                    COUNT(*) AS failures,
                    COUNT(DISTINCT COALESCE(error_rule, 'pending')) AS distinct_causes,
                    MAX(COALESCE(error_title, '')) AS sample_cause,
                    MAX(created_at) AS last_failure
-            FROM jobs
-            WHERE source = ? AND created_at >= ? AND status = 'Failed'
+            FROM jobs WHERE {where}
             GROUP BY flow_id, flow_name ORDER BY failures DESC LIMIT ?
-        """, (source, since, limit)).fetchall()
+        """, params + [limit]).fetchall()
     return [dict(r) for r in rows]
 
 
-def top_failing_users(since: str, source: str = "aacp", limit: int = 10) -> list[dict]:
+def top_failing_users(since: str, source: str = "aacp", limit: int = 10,
+                      until: Optional[str] = None, filters: Optional[dict] = None) -> list[dict]:
+    where, params = _failure_scope(since, until, filters, source)
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT COALESCE(creator_email, '(unknown)') AS creator_email,
                    COUNT(*) AS failures,
                    COUNT(DISTINCT flow_id) AS flows
-            FROM jobs
-            WHERE source = ? AND created_at >= ? AND status = 'Failed'
+            FROM jobs WHERE {where}
             GROUP BY creator_email ORDER BY failures DESC LIMIT ?
-        """, (source, since, limit)).fetchall()
+        """, params + [limit]).fetchall()
     return [dict(r) for r in rows]
 
 
-def ran_from_breakdown(since: str, source: str = "aacp") -> list[dict]:
+def ran_from_breakdown(since: str, source: str = "aacp", until: Optional[str] = None) -> list[dict]:
     """How jobs were triggered (api / schedule / ui), with their failure counts."""
     with get_db() as conn:
         rows = conn.execute("""
@@ -885,6 +932,92 @@ def ran_from_breakdown(since: str, source: str = "aacp") -> list[dict]:
                    COUNT(*) AS total,
                    SUM(status = 'Failed') AS failed
             FROM jobs WHERE source = ? AND created_at >= ?
+              AND (? IS NULL OR created_at < ?)
             GROUP BY name ORDER BY total DESC
-        """, (source, since)).fetchall()
+        """, (source, since, until, until)).fetchall()
     return [{k: (r[k] or 0) if k != "name" else r[k] for k in r.keys()} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Error message drill-down
+# ---------------------------------------------------------------------------
+
+def error_messages(since: str, until: Optional[str] = None, filters: Optional[dict] = None,
+                   source: str = "aacp", limit: int = 50) -> list[dict]:
+    """
+    Distinct error messages behind a set of failures, most frequent first.
+
+    Grouped on error_signature (ids and paths masked) so that hundreds of
+    instances of one problem collapse into a single row, while a real sample of
+    the raw text is carried along for the person debugging it.
+    """
+    where = ["source = ?", "status = 'Failed'", "created_at >= ?", "error_signature IS NOT NULL"]
+    params: list[Any] = [source, since]
+    if until:
+        where.append("created_at < ?")
+        params.append(until)
+    for col in ("error_rule", "error_category", "failure_stage", "flow_id", "error_signature"):
+        if filters and filters.get(col):
+            where.append(f"{col} = ?")
+            params.append(filters[col])
+
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT error_signature AS signature,
+                   COUNT(*) AS count,
+                   COUNT(DISTINCT flow_id) AS flows,
+                   COUNT(DISTINCT creator_email) AS users,
+                   MIN(created_at) AS first_seen,
+                   MAX(created_at) AS last_seen,
+                   MAX(error_title) AS title,
+                   MAX(error_category) AS category,
+                   MAX(error_rule) AS rule,
+                   MAX(error_type) AS exception_type,
+                   MAX(error_label) AS exception_label,
+                   MAX(error_code) AS error_code,
+                   MAX(failure_stage) AS failure_stage,
+                   MAX(error_why) AS sample_why,
+                   MAX(error_detail) AS sample_detail,
+                   MAX(job_id) AS sample_job_id
+            FROM jobs WHERE {' AND '.join(where)}
+            GROUP BY error_signature
+            ORDER BY count DESC LIMIT ?
+        """, params + [limit]).fetchall()
+    return [dict(r) for r in rows]
+
+
+def signature_flows(since: str, signature: str, until: Optional[str] = None,
+                    source: str = "aacp", limit: int = 10) -> list[dict]:
+    """Which flows are hitting one specific error message."""
+    where = ["source = ?", "status = 'Failed'", "created_at >= ?", "error_signature = ?"]
+    params: list[Any] = [source, since, signature]
+    if until:
+        where.append("created_at < ?")
+        params.append(until)
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT flow_id, COALESCE(flow_name, '(unknown)') AS flow_name,
+                   COUNT(*) AS failures, MAX(created_at) AS last_failure,
+                   MAX(COALESCE(creator_email, '')) AS creator_email
+            FROM jobs WHERE {' AND '.join(where)}
+            GROUP BY flow_id, flow_name ORDER BY failures DESC LIMIT ?
+        """, params + [limit]).fetchall()
+    return [dict(r) for r in rows]
+
+
+def rows_needing_signature(limit: int = 5000, source: str = "aacp") -> list[dict]:
+    """Already-enriched failures written before signatures existed."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT job_id, error_why, error_detail, error_type
+            FROM jobs
+            WHERE source = ? AND status = 'Failed' AND enriched_at IS NOT NULL
+              AND error_signature IS NULL
+            LIMIT ?
+        """, (source, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_signature(job_id: int, signature: str):
+    with get_db() as conn:
+        conn.execute("UPDATE jobs SET error_signature = ? WHERE job_id = ?", (signature, int(job_id)))

@@ -369,6 +369,41 @@ async function ajLoadDailyChart() {
 // Filters
 // ---------------------------------------------------------------------------
 
+// Filters handed over from the Dashboard ("view these failures in All Jobs").
+// Kept separate from the sidebar controls so clearing one does not wipe the other.
+let _ajHandoff = null;
+
+function ajApplyHandoff(handoff) {
+    _ajHandoff = handoff && Object.keys(handoff).length ? { ...handoff } : null;
+    const statusEl = document.getElementById("ajStatusFilter");
+    if (statusEl && _ajHandoff) statusEl.value = "Failed";
+    _ajRenderHandoffChip();
+    ajLoadKpis();
+    ajQueryJobs();
+}
+
+function ajClearHandoff() {
+    _ajHandoff = null;
+    _ajRenderHandoffChip();
+    ajLoadKpis();
+    ajQueryJobs();
+}
+
+function _ajRenderHandoffChip() {
+    const bar = document.getElementById("ajHandoffBar");
+    if (!bar) return;
+    if (!_ajHandoff) { bar.style.display = "none"; bar.innerHTML = ""; return; }
+    const labels = { error_category: "Category", error_rule: "Cause",
+                     failure_stage: "Stage", flow_id: "Flow", error_signature: "Error" };
+    const chips = Object.entries(_ajHandoff)
+        .filter(([k]) => labels[k])
+        .map(([k, v]) => `<span class="ov-chip">${labels[k]}: <strong>${esc(String(v).slice(0, 70))}</strong></span>`)
+        .join("");
+    bar.innerHTML = `<span class="ov-chip-lead">From dashboard</span>${chips}
+        <button class="ov-chip-clear" onclick="ajClearHandoff()">Clear</button>`;
+    bar.style.display = "";
+}
+
 function _ajBuildFilterParams() {
     const params = new URLSearchParams();
     const search = document.getElementById("ajSearch")?.value?.trim();
@@ -378,6 +413,12 @@ function _ajBuildFilterParams() {
     if (search) params.set("search", search);
     if (status) params.set("status", status);
     if (days) params.set("days", days);
+
+    if (_ajHandoff) {
+        Object.entries(_ajHandoff).forEach(([k, v]) => {
+            if (v != null && v !== "") params.set(k, v);
+        });
+    }
 
     return params.toString();
 }

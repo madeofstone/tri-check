@@ -21,6 +21,11 @@ let ovWindow = "24h";
 let ovCharts = {};
 let ovData = null;
 
+// Cross-filter state. Every panel re-queries against this, so clicking a bar
+// narrows the whole dashboard rather than just one chart.
+let ovFilters = {};
+let ovOpenMessage = null;   // signature of the expanded drill-down row
+
 const OV_WINDOW_LABELS = { "1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "14d": "14 days" };
 
 // ---------------------------------------------------------------------------
@@ -36,7 +41,9 @@ async function ovLoad(window) {
     if (!ovData) wrap.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading dashboard…</span></div>`;
 
     try {
-        const resp = await fetch(`${API_BASE}/api/dashboard?window=${encodeURIComponent(ovWindow)}`);
+        const params = new URLSearchParams({ window: ovWindow });
+        Object.entries(ovFilters).forEach(([k, v]) => { if (v != null && v !== "") params.set(k, v); });
+        const resp = await fetch(`${API_BASE}/api/dashboard?${params}`);
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
         ovData = data;
@@ -47,6 +54,78 @@ async function ovLoad(window) {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-filtering
+// ---------------------------------------------------------------------------
+
+const OV_FILTER_LABELS = {
+    error_category: "Category", error_rule: "Cause", failure_stage: "Stage",
+    flow_id: "Flow", from: "From", to: "To",
+};
+
+function ovSetFilter(key, value) {
+    if (value == null || value === "" || ovFilters[key] === value) {
+        delete ovFilters[key];            // clicking the active slice clears it
+    } else {
+        ovFilters[key] = value;
+    }
+    ovOpenMessage = null;
+    ovLoad();
+}
+
+function ovSetTimeRange(from, to) {
+    if (ovFilters.from === from && ovFilters.to === to) {
+        delete ovFilters.from; delete ovFilters.to;
+    } else {
+        ovFilters.from = from; ovFilters.to = to;
+    }
+    ovOpenMessage = null;
+    ovLoad();
+}
+
+function ovClearFilter(key) {
+    delete ovFilters[key];
+    if (key === "from") delete ovFilters.to;
+    ovLoad();
+}
+
+function ovClearAllFilters() {
+    ovFilters = {};
+    ovOpenMessage = null;
+    ovLoad();
+}
+
+function ovFilterChips() {
+    const keys = Object.keys(ovFilters).filter(k => k !== "to");
+    if (!keys.length) return "";
+    const chips = keys.map(k => {
+        const label = OV_FILTER_LABELS[k] || k;
+        let value = ovFilters[k];
+        if (k === "from") {
+            value = `${ovShortTime(ovFilters.from)} → ${ovShortTime(ovFilters.to)}`;
+        }
+        if (k === "flow_id" && ovData) {
+            const hit = ovData.topFlows.find(f => String(f.flow_id) === String(value));
+            if (hit) value = hit.flow_name;
+        }
+        return `<span class="ov-chip">${esc(label)}: <strong>${esc(String(value).slice(0, 60))}</strong>
+            <button class="ov-chip-x" onclick="ovClearFilter('${k}')" title="Remove">×</button></span>`;
+    }).join("");
+    return `<div class="ov-chip-bar"><span class="ov-chip-lead">Filtered</span>${chips}
+        <button class="ov-chip-clear" onclick="ovClearAllFilters()">Clear all</button></div>`;
+}
+
+/* Hand the current slice to the All Jobs tab, where the individual runs live. */
+function ovViewInAllJobs(extra) {
+    const handoff = {};
+    ["error_category", "error_rule", "failure_stage", "flow_id"].forEach(k => {
+        if (ovFilters[k]) handoff[k] = ovFilters[k];
+    });
+    Object.assign(handoff, extra || {});
+    switchTab("allJobs");
+    ajApplyHandoff(handoff);
+}
+
+// ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 
@@ -54,13 +133,17 @@ function ovRender(d) {
     const s = d.summary;
     const finished = s.complete + s.failed + s.canceled;
 
+    const filtered = Object.keys(ovFilters).length > 0;
+
     document.getElementById("ovContent").innerHTML = `
+        ${ovFilterChips()}
+        ${filtered ? `<div class="ov-filter-note">Showing failures only — <button class="ov-link" onclick="ovViewInAllJobs()">view these runs in All Jobs →</button></div>` : ""}
         <div class="ov-kpis">
             ${ovKpi("Failure rate", `${s.failureRate}%`, `${fmtNum(s.failed)} of ${fmtNum(finished)} finished runs`, s.failureRate >= 15 ? "bad" : s.failureRate >= 5 ? "warn" : "good")}
-            ${ovKpi("Job runs", fmtNum(s.total), `${fmtNum(s.running)} still running`)}
+            ${ovKpi("Job runs", fmtNum(s.total), filtered ? "matching runs" : `${fmtNum(s.running)} still running`)}
             ${ovKpi("Succeeded", fmtNum(s.complete), "", "good")}
             ${ovKpi("Failed", fmtNum(s.failed), s.canceled ? `${fmtNum(s.canceled)} canceled` : "", "bad")}
-            ${ovKpi("Flows run", fmtNum(s.flows), `${fmtNum(s.users)} users`)}
+            ${ovKpi("Distinct flows", fmtNum(s.flows), `${fmtNum(s.users)} users`)}
             ${ovKpi("Compute wasted", `${fmtNum(s.wastedHours)}h`, "time spent on runs that failed")}
         </div>
 
@@ -102,6 +185,14 @@ function ovRender(d) {
                 ${ovFlowsTable(d.topFlows)}
             </section>
         </div>
+
+        <section class="ov-card ov-card-wide">
+            <div class="ov-card-head">
+                <h3>Error messages</h3>
+                <span class="ov-card-sub">grouped by message text — click one for the full error and affected flows</span>
+            </div>
+            ${ovMessagesList(d.errorMessages, s.failed)}
+        </section>
 
         <div class="ov-row">
             <section class="ov-card">
@@ -179,12 +270,28 @@ function ovDrawTrend(d) {
         },
         options: {
             ...OV_BASE_OPTS,
+            onClick: (evt, els) => {
+                if (!els.length) return;
+                const p = d.timeseries[els[0].index];
+                if (p) ovSetTimeRange(...ovBucketRange(p.bucket, d.bucketMinutes));
+            },
+            onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? "pointer" : "default"; },
             scales: {
                 x: { stacked: true, grid: { display: false }, ticks: { color: OV_TEXT, font: { size: 10 }, maxRotation: 0, autoSkipPadding: 16 } },
                 y: { stacked: true, beginAtZero: true, grid: { color: OV_GRID, drawBorder: false }, ticks: { color: OV_TEXT, font: { size: 10 }, precision: 0 } },
             },
         },
     });
+}
+
+/* A clicked bucket becomes an explicit [from, to) range the API can filter on. */
+function ovBucketRange(bucket, minutes) {
+    let from;
+    // SQL buckets are 'YYYY-MM-DD' (day) or 'YYYY-MM-DDTHH:MM' (hour/minute).
+    from = minutes >= 1440 ? `${bucket}T00:00:00.000Z` : `${bucket}:00.000Z`;
+    const to = new Date(new Date(from).getTime() + minutes * 60000)
+        .toISOString().replace(/\.\d{3}Z$/, ".000Z");
+    return [from, to];
 }
 
 function ovBucketLabel(bucket, minutes) {
@@ -195,7 +302,7 @@ function ovBucketLabel(bucket, minutes) {
 
 /* One series → one hue, no legend; the card title names it. Direct value
    labels sit at the end of each bar so the ranking is readable without hover. */
-function ovHBar(canvasId, key, rows, colorFn) {
+function ovHBar(canvasId, key, rows, colorFn, filterKey) {
     ovDestroy(key);
     const ctx = document.getElementById(canvasId);
     if (!ctx) return;
@@ -218,6 +325,12 @@ function ovHBar(canvasId, key, rows, colorFn) {
         options: {
             ...OV_BASE_OPTS,
             indexAxis: "y",
+            onClick: (evt, els) => {
+                if (!els.length || !filterKey) return;
+                const row = rows[els[0].index];
+                if (row && row.name !== "Other") ovSetFilter(filterKey, row.name);
+            },
+            onHover: (evt, els) => { evt.native.target.style.cursor = (els.length && filterKey) ? "pointer" : "default"; },
             plugins: { ...OV_BASE_OPTS.plugins, legend: { display: false } },
             scales: {
                 x: { beginAtZero: true, grid: { color: OV_GRID, drawBorder: false }, ticks: { color: OV_TEXT, font: { size: 10 }, precision: 0 } },
@@ -228,7 +341,7 @@ function ovHBar(canvasId, key, rows, colorFn) {
 }
 
 function ovDrawStages(d) {
-    ovHBar("ovStageChart", "stages", d.failureStages, () => OV_SERIES[0]);
+    ovHBar("ovStageChart", "stages", d.failureStages, () => OV_SERIES[0], "failure_stage");
 }
 
 function ovDrawCategories(d) {
@@ -238,7 +351,7 @@ function ovDrawCategories(d) {
     if (rest.length) cats.push({ name: "Other", count: rest.reduce((a, r) => a + r.count, 0) });
     const order = [...cats].sort((a, b) => a.name.localeCompare(b.name)).map(c => c.name);
     ovHBar("ovCategoryChart", "categories", cats,
-           r => OV_SERIES[order.indexOf(r.name) % OV_SERIES.length]);
+           r => OV_SERIES[order.indexOf(r.name) % OV_SERIES.length], "error_category");
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +363,7 @@ function ovCausesTable(rules, totalFailed) {
     return `<table class="ov-table"><thead><tr>
             <th>Cause</th><th>Category</th><th class="num">Failures</th><th class="num">Share</th>
         </tr></thead><tbody>
-        ${rules.map(r => `<tr>
+        ${rules.map(r => `<tr class="ov-clickable ${ovFilters.error_rule === r.rule ? "ov-active" : ""}" onclick="ovSetFilter('error_rule', decodeURIComponent('${encodeURIComponent(r.rule)}'))">
             <td>${esc(r.title)}</td>
             <td><span class="ov-pill">${esc(r.category)}</span></td>
             <td class="num">${fmtNum(r.count)}</td>
@@ -264,7 +377,7 @@ function ovFlowsTable(flows) {
     return `<table class="ov-table"><thead><tr>
             <th>Flow</th><th class="num">Failures</th><th class="num">Causes</th><th>Last</th>
         </tr></thead><tbody>
-        ${flows.map(f => `<tr>
+        ${flows.map(f => `<tr class="ov-clickable ${String(ovFilters.flow_id) === String(f.flow_id) ? "ov-active" : ""}" onclick="ovSetFilter('flow_id', '${esc(String(f.flow_id))}')">
             <td title="${esc(f.flow_name)}">${esc(f.flow_name)}</td>
             <td class="num">${fmtNum(f.failures)}</td>
             <td class="num">${f.distinct_causes}</td>
@@ -357,9 +470,137 @@ function ovPollSync() {
 }
 
 function ovInit() {
+    ovLoadHints();
     ovLoad(ovWindow);
     // If a sync is already running (e.g. started before a page reload), follow it.
     fetch(`${API_BASE}/api/sync/status`).then(r => r.json()).then(s => {
         if (s.running) ovPollSync();
     }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Error message drill-down
+// ---------------------------------------------------------------------------
+
+/*
+ * The categories answer "what kind of problem"; this answers "what does the
+ * platform actually say", which is what someone needs to fix it. Messages are
+ * grouped on a signature with ids, paths and quoted names masked, so one real
+ * problem is one row no matter how many times it fired.
+ */
+function ovMessagesList(messages, totalFailed) {
+    if (!messages || !messages.length) {
+        return `<div class="ov-empty-sm">No classified failures in this slice</div>`;
+    }
+    return `<div class="ov-msgs">${messages.map(m => ovMessageRow(m, totalFailed)).join("")}</div>`;
+}
+
+function ovMessageRow(m, totalFailed) {
+    const open = ovOpenMessage === m.signature;
+    const share = totalFailed ? (100 * m.count / totalFailed).toFixed(1) : "0";
+    const sig = encodeURIComponent(m.signature || "");
+    return `
+    <div class="ov-msg ${open ? "open" : ""}">
+        <div class="ov-msg-head" onclick="ovToggleMessage('${sig}')">
+            <span class="ov-msg-arrow">${open ? "▾" : "▸"}</span>
+            <span class="ov-msg-count">${fmtNum(m.count)}</span>
+            <span class="ov-msg-pill">${esc(m.category || "—")}</span>
+            <span class="ov-msg-text" title="${esc(m.signature || "")}">${esc(m.signature || "")}</span>
+            <span class="ov-msg-meta">${fmtNum(m.flows)} flows · ${share}%</span>
+        </div>
+        <div class="ov-msg-body" id="ovMsgBody-${ovSigKey(m.signature)}">
+            ${open ? ovMessageBodyPlaceholder() : ""}
+        </div>
+    </div>`;
+}
+
+// A DOM-safe id for a signature (which is free-form text).
+function ovSigKey(signature) {
+    let h = 0;
+    const s = signature || "";
+    for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+    return `s${Math.abs(h)}`;
+}
+
+function ovMessageBodyPlaceholder() {
+    return `<div class="ov-msg-loading"><span class="spinner spinner-sm"></span> Loading error detail…</div>`;
+}
+
+async function ovToggleMessage(encodedSig) {
+    const signature = decodeURIComponent(encodedSig);
+    ovOpenMessage = (ovOpenMessage === signature) ? null : signature;
+    ovRender(ovData);                      // redraw rows so arrows/highlight update
+    if (!ovOpenMessage) return;
+
+    const body = document.getElementById(`ovMsgBody-${ovSigKey(signature)}`);
+    if (!body) return;
+    try {
+        const params = new URLSearchParams({ window: ovWindow, signature });
+        Object.entries(ovFilters).forEach(([k, v]) => { if (v != null && v !== "") params.set(k, v); });
+        const data = await (await fetch(`${API_BASE}/api/failures/message?${params}`)).json();
+        if (data.error) throw new Error(data.error);
+        body.innerHTML = ovMessageDetail(data);
+    } catch (e) {
+        body.innerHTML = `<div class="ov-error">⚠ ${esc(e.message)}</div>`;
+    }
+}
+
+function ovMessageDetail(data) {
+    const s = data.summary || {};
+    const hint = OV_HINTS[s.rule];
+    const full = s.sample_why || s.sample_detail || "";
+    return `
+    <div class="ov-msg-detail">
+        <div class="ov-msg-facts">
+            ${ovFact("Cause", s.title)}
+            ${ovFact("Stage", s.failure_stage)}
+            ${ovFact("Exception", s.exception_type)}
+            ${ovFact("Label", s.exception_label)}
+            ${ovFact("Code", s.error_code)}
+            ${ovFact("First seen", ovShortTime(s.first_seen))}
+            ${ovFact("Last seen", ovShortTime(s.last_seen))}
+        </div>
+        ${hint ? `<div class="ov-msg-hint">💡 ${esc(hint)}</div>` : ""}
+        <div class="ov-msg-label">Full message from AAC</div>
+        <pre class="ov-msg-raw">${esc(full)}</pre>
+        <div class="ov-msg-label">Flows hitting this error</div>
+        <table class="ov-table ov-table-tight"><thead><tr>
+            <th>Flow</th><th>User</th><th class="num">Failures</th><th>Last</th><th></th>
+        </tr></thead><tbody>
+            ${(data.flows || []).map(f => `<tr>
+                <td title="${esc(f.flow_name)}">${esc(f.flow_name)}</td>
+                <td class="ov-dim">${esc((f.creator_email || "").split("@")[0])}</td>
+                <td class="num">${fmtNum(f.failures)}</td>
+                <td class="ov-dim">${esc(ovShortTime(f.last_failure))}</td>
+                <td><button class="ov-link" onclick="ovViewFlowJobs(${f.flow_id}, '${encodeURIComponent(data.signature)}')">runs →</button></td>
+            </tr>`).join("")}
+        </tbody></table>
+        <div class="ov-msg-actions">
+            <button class="btn-secondary" onclick="ovViewSignatureJobs('${encodeURIComponent(data.signature)}')">
+                View all ${fmtNum(s.count)} runs in All Jobs →
+            </button>
+        </div>
+    </div>`;
+}
+
+function ovFact(label, value) {
+    if (value == null || value === "") return "";
+    return `<div class="ov-fact"><span class="ov-fact-label">${esc(label)}</span><span class="ov-fact-value">${esc(String(value))}</span></div>`;
+}
+
+function ovViewSignatureJobs(encodedSig) {
+    ovViewInAllJobs({ error_signature: decodeURIComponent(encodedSig) });
+}
+
+function ovViewFlowJobs(flowId, encodedSig) {
+    ovViewInAllJobs({ flow_id: String(flowId), error_signature: decodeURIComponent(encodedSig) });
+}
+
+// Remediation hints come from the rule file, surfaced with the error text.
+const OV_HINTS = {};
+async function ovLoadHints() {
+    try {
+        const rules = await (await fetch(`${API_BASE}/api/error-rules`)).json();
+        (rules.rules || []).forEach(r => { if (r.hint) OV_HINTS[r.id] = r.hint; });
+    } catch (_) { /* hints are a nicety; the dashboard works without them */ }
 }

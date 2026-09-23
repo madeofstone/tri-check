@@ -158,6 +158,7 @@ def _enrich_failures(api: PlatformAPI, limit: int = ENRICH_BATCH) -> int:
                 "errorCode": parsed.get("errorCode"), "why": (parsed.get("why") or "")[:2000],
                 "detail": (parsed.get("message") or "")[:4000],
                 "errorMessageId": parsed.get("errorMessageId"),
+                "signature": classifier.signature(parsed),
             })
             done += 1
             _set(enriched=_state["enriched"] + 1,
@@ -198,6 +199,9 @@ def run_sync(full: bool = False):
                 _set(phase="incremental", message="fetching new and updated jobs")
                 _fetch_window(api, "updatedAt", since)
 
+            _set(phase="signatures", message="grouping error messages")
+            backfill_signatures()
+
             _set(phase="enrich", message="classifying failures")
             while _enrich_failures(api) >= ENRICH_BATCH:
                 pass  # keep going while full batches come back
@@ -223,3 +227,31 @@ def window_since(window: str) -> str:
 def bucket_minutes(window: str) -> int:
     """Chart bucket size that keeps each window readable."""
     return {"1h": 5, "6h": 30, "24h": 60, "7d": 1440, "14d": 1440}.get(window, 60)
+
+
+def backfill_signatures(batch: int = 5000) -> int:
+    """
+    Compute message signatures for failures enriched before signatures existed.
+
+    Purely local — it re-derives the signature from the error text already
+    stored, so no AAC calls and no re-enrichment.
+    """
+    total = 0
+    while True:
+        rows = db.rows_needing_signature(limit=batch)
+        if not rows:
+            break
+        for row in rows:
+            sig = classifier.signature({
+                "why": row.get("error_why"),
+                "message": row.get("error_detail"),
+                "exceptionType": row.get("error_type"),
+            })
+            db.set_signature(row["job_id"], sig)
+            total += 1
+        _set(message=f"{total} error messages grouped")
+        if len(rows) < batch:
+            break
+    if total:
+        log.info(f"Backfilled {total} error signatures")
+    return total
