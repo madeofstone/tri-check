@@ -18,8 +18,10 @@ Two tabs:
 - **Dashboard** (landing tab) — volume, failure rate, root stage, cause
   categories, repeat-offender flows, error-message drill-down. Everything
   cross-filters.
-- **All Jobs** — the job list, with a per-job detail panel (stages, failure,
-  source/target) and a Databricks log bundle download.
+- **All Jobs** — the job list. Clicking anywhere on a row opens its detail
+  panel: stages, failure, source/target, the Databricks log bundle download and
+  the Databricks run panel (cluster, Spark config, cluster events, event-log
+  explorer). The DBX column is an indicator only.
 
 ## Data flow
 
@@ -60,7 +62,7 @@ No framework, no build step. Plain files served by Flask; Chart.js from CDN.
 | `index.html` | Both tab panels, the settings modal, script/style includes |
 | `overview.js` / `overview.css` | Dashboard tab: KPIs, charts, cross-filtering, message drill-down |
 | `all_jobs.js` | All Jobs tab: table, filters, job detail panel, log download |
-| `app.js` | Shared helpers (`esc`, `statusBadge`, `formatDateTime`), the settings modal, the DBX panel, compare modal |
+| `app.js` | Shared helpers (`esc`, `statusBadge`, `formatDateTime`), the settings modal, `renderDbxPanel` (rendered inside the All Jobs detail panel), compare modal |
 | `dashboard.js` / `dashboard.css` | Spark performance dashboard for a single event log (older feature) |
 | `styles.css` | Base styling and CSS variables (`--bg-card`, `--red`, …) |
 

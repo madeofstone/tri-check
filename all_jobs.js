@@ -2,7 +2,7 @@
    All Jobs Tab — Fetch, display, filter, and group all AACP jobs
    ============================================================
    Depends on: app.js (for esc(), fmtDurationMs(), statusBadge(),
-               formatDateTime(), toggleDbxPanel(), renderDbxPanel())
+               formatDateTime(), renderDbxPanel())
    ============================================================ */
 
 // State
@@ -463,14 +463,15 @@ function _ajRenderFlat(jobs) {
     </tr>`;
 
     body.innerHTML = jobs.map(j => {
+        // Indicator only — the Databricks panel now lives inside the job detail.
         const dbxBtn = j.databricks_job_id
-            ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-dbxurl="${esc(j.databricks_service_url || "")}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
+            ? `<span class="dbx-tag-static" title="Ran on Databricks">DBX</span>`
             : `<span class="cell-empty">—</span>`;
 
         const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
-        return `<tr data-jobid="${j.job_id}">
+        return `<tr class="aj-row" data-jobid="${j.job_id}" onclick="ajRowClick(event, this, ${j.job_id})">
             <td><input type="checkbox" class="compare-cb" value="${j.job_id}" onchange="toggleCompareCheck(this, ${j.job_id})" ${isChecked}></td>
-            <td><button class="aj-expand-btn" data-jobid="${j.job_id}" onclick="ajToggleDetail(this, ${j.job_id})" title="Job details">▸</button></td>
+            <td><button class="aj-expand-btn" data-jobid="${j.job_id}" tabindex="-1" title="Job details">▸</button></td>
             <td><strong>${j.job_id}</strong></td>
             <td>${statusBadge(j.status)}</td>
             <td>${esc(j.flow_name || "—")}</td>
@@ -555,12 +556,12 @@ function _ajRenderGrouped(groups) {
         // Expanded child rows — same columns as flat view
         for (const j of g.jobs) {
             const dbxBtn = j.databricks_job_id
-                ? `<button class="dbx-btn" data-dbxid="${esc(j.databricks_job_id)}" data-dbxurl="${esc(j.databricks_service_url || "")}" data-jobid="${j.job_id}" onclick="ajToggleDbx(this)">DBX ▸</button>`
+                ? `<span class="dbx-tag-static" title="Ran on Databricks">DBX</span>`
                 : `<span class="cell-empty">—</span>`;
 
             const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
-            html += `<tr class="aj-group-child ${gid}" style="display:none">
-                <td><button class="aj-expand-btn" data-jobid="${j.job_id}" onclick="ajToggleDetail(this, ${j.job_id})" title="Job details">▸</button></td>
+            html += `<tr class="aj-group-child aj-row ${gid}" style="display:none" onclick="ajRowClick(event, this, ${j.job_id})">
+                <td><button class="aj-expand-btn" data-jobid="${j.job_id}" tabindex="-1" title="Job details">▸</button></td>
                 <td><input type="checkbox" class="compare-cb" value="${j.job_id}" onchange="toggleCompareCheck(this, ${j.job_id})" ${isChecked}></td>
                 <td><strong>${j.job_id}</strong></td>
                 <td>${statusBadge(j.status)}</td>
@@ -592,57 +593,53 @@ function ajToggleGroupRow(gid) {
 // DBX Panel (reuses shared code from app.js)
 // ---------------------------------------------------------------------------
 
-async function ajToggleDbx(btn) {
-    const parentRow = btn.closest("tr");
-    const existingDetail = parentRow.nextElementSibling;
+/* Cluster details, Spark config, cluster events and the event-log explorer.
+   This used to be a separate DBX column button; it now lives inside the job
+   detail so investigating a job is one place rather than two. */
+async function ajToggleDbxPanel(jobId, runId, encodedUrl) {
+    const panel = document.getElementById(`ajDbxPanel-${jobId}`);
+    const btn = document.getElementById(`ajDbxPanelBtn-${jobId}`);
+    if (!panel) return;
 
-    // Toggle off
-    if (existingDetail && existingDetail.classList.contains("dbx-detail-row")) {
-        existingDetail.remove();
-        btn.textContent = "DBX ▸";
-        btn.classList.remove("active");
+    if (panel.dataset.open === "1") {
+        panel.innerHTML = "";
+        panel.dataset.open = "";
+        btn.innerHTML = "Run details &amp; event log ▸";
         return;
     }
 
-    // Toggle on
-    btn.textContent = "DBX ▾";
-    btn.classList.add("active");
-
-    const dbxId = btn.dataset.dbxid;
-    const dbxUrl = btn.dataset.dbxurl || "";
-    const jobId = btn.dataset.jobid;
-    const totalCols = 10;
-
-    const detailRow = document.createElement("tr");
-    detailRow.className = "dbx-detail-row";
-    detailRow.innerHTML = `<td colspan="${totalCols}" class="dbx-detail-cell"><div class="dbx-loading"><span class="spinner"></span> Loading Databricks details…</div></td>`;
-    parentRow.after(detailRow);
+    panel.dataset.open = "1";
+    btn.innerHTML = "Run details &amp; event log ▾";
+    panel.innerHTML = `<div class="aj-detail-loading"><span class="spinner spinner-sm"></span> Loading Databricks run…</div>`;
 
     try {
         const resp = await fetch(`${API_BASE}/api/databricks`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ databricksJobId: dbxId, flowName: "", jobRunId: jobId, databricksServiceUrl: dbxUrl }),
+            body: JSON.stringify({
+                databricksJobId: runId,
+                flowName: "",
+                jobRunId: jobId,
+                databricksServiceUrl: decodeURIComponent(encodedUrl),
+            }),
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
         data._jobRunId = jobId;
         data._flowName = "";
 
-        // Check if analysis already exists for this job
+        // Surface an existing event-log analysis so the button reads correctly.
         try {
             const analysisResp = await fetch(`${API_BASE}/api/eventlog/${encodeURIComponent(jobId)}`);
             if (analysisResp.ok) {
                 const analysisData = await analysisResp.json();
-                if (analysisData.analysis && !analysisData.error) {
-                    data._isAnalyzed = true;
-                }
+                if (analysisData.analysis && !analysisData.error) data._isAnalyzed = true;
             }
-        } catch (_) { /* ignore — just means no analysis yet */ }
+        } catch (_) { /* no analysis yet */ }
 
-        detailRow.querySelector(".dbx-detail-cell").innerHTML = renderDbxPanel(data);
+        panel.innerHTML = renderDbxPanel(data);
     } catch (e) {
-        detailRow.querySelector(".dbx-detail-cell").innerHTML = `<div class="dbx-error">⚠ ${esc(e.message)}</div>`;
+        panel.innerHTML = `<div class="aj-detail-error">⚠ ${esc(e.message)}</div>`;
     }
 }
 
@@ -660,6 +657,14 @@ function ajInit() {
 // ---------------------------------------------------------------------------
 
 const AJ_DETAIL_COLS = 12;
+
+/* The whole row opens the detail panel. Clicks on a control inside the row
+   (the compare checkbox, a link) keep their own behaviour. */
+function ajRowClick(event, row, jobId) {
+    if (event.target.closest("input, a, label, select")) return;
+    const btn = row.querySelector(".aj-expand-btn");
+    if (btn) ajToggleDetail(btn, jobId);
+}
 
 async function ajToggleDetail(btn, jobId) {
     const row = btn.closest("tr");
@@ -729,12 +734,19 @@ function ajRenderDetail(d) {
 
         ${err ? `<div class="aj-detail-label">Source & target</div>${ajIoBlock(d)}` : ""}
 
-        <div class="aj-detail-label">Databricks logs</div>
-        <div class="aj-dbx-logs" id="ajDbxLogs-${j.job_id}">
-            ${d.databricks && d.databricks.available
-                ? `<div class="aj-detail-loading"><span class="spinner spinner-sm"></span> Checking what Databricks has…</div>`
-                : `<div class="aj-detail-dim">This job has no Databricks run recorded — it never reached Spark.</div>`}
-        </div>
+        <div class="aj-detail-label">Databricks</div>
+        ${d.databricks && d.databricks.available ? `
+            <div class="aj-dbx-logs" id="ajDbxLogs-${j.job_id}">
+                <div class="aj-detail-loading"><span class="spinner spinner-sm"></span> Checking what Databricks has…</div>
+            </div>
+            <div class="aj-dbx-actions">
+                <button class="btn-secondary" id="ajDbxPanelBtn-${j.job_id}"
+                        onclick="ajToggleDbxPanel(${j.job_id}, '${esc(String(d.databricks.runId))}', '${encodeURIComponent(d.databricks.workspace || "")}')">
+                    Run details &amp; event log ▸
+                </button>
+            </div>
+            <div class="aj-dbx-panel" id="ajDbxPanel-${j.job_id}"></div>
+        ` : `<div class="aj-detail-dim">This job has no Databricks run recorded — it never reached Spark.</div>`}
     </div>`;
 }
 

@@ -348,3 +348,30 @@
 .aj-flag-advisory { font-size: 10px; color: var(--amber); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; }
 .aj-flag-cascade  { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
 .aj-flag-warn     { font-size: 10px; color: var(--amber); text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* ===== All Jobs: whole-row expansion ===== */
+
+.aj-row { cursor: pointer; }
+.aj-row:hover > td { background: var(--bg-elevated); }
+.aj-row .compare-cb { cursor: default; }
+
+/* The caret is an affordance now, not the only target — the row handles the
+   click, so the button must not swallow it or take focus. */
+.aj-expand-btn { pointer-events: none; }
+
+/* DBX column is an indicator: it says the job ran on Databricks, and the panel
+   itself lives inside the job detail. */
+.dbx-tag-static {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-bg);
+    color: var(--accent-hover);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+
+.aj-dbx-actions { margin-top: 10px; }
+.aj-dbx-panel:empty { display: none; }
+.aj-dbx-panel { margin-top: 12px; }
