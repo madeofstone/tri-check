@@ -267,7 +267,8 @@ def get_jobs(
         if filters.get("created_since"):
             where_clauses.append("created_at >= ?")
             params.append(filters["created_since"])
-        for col in ("error_rule", "error_category", "failure_stage", "error_signature"):
+        for col in ("error_rule", "error_category", "failure_stage", "error_signature",
+                    "schema_drift"):
             if filters.get(col):
                 where_clauses.append(f"{col} = ?")
                 params.append(filters[col])
@@ -345,7 +346,8 @@ def get_jobs_grouped_by_flow(
         if filters.get("created_since"):
             where_clauses.append("created_at >= ?")
             params.append(filters["created_since"])
-        for col in ("error_rule", "error_category", "failure_stage", "error_signature"):
+        for col in ("error_rule", "error_category", "failure_stage", "error_signature",
+                    "schema_drift"):
             if filters.get(col):
                 where_clauses.append(f"{col} = ?")
                 params.append(filters[col])

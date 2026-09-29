@@ -798,7 +798,8 @@ def query_all_jobs():
 
     filters = {}
     for key in ("status", "flow_id", "flow_name", "creator_email", "ran_for", "search", "days",
-                "error_rule", "error_category", "failure_stage", "error_signature"):
+                "error_rule", "error_category", "failure_stage", "error_signature",
+                "schema_drift"):
         val = request.args.get(key, "").strip()
         if val:
             filters[key] = val
@@ -1177,7 +1178,8 @@ def list_failures():
         return jsonify({"error": f"window must be one of {', '.join(WINDOWS)}"}), 400
 
     filters = {"status": "Failed", "created_since": aac_sync.window_since(window)}
-    for key in ("error_rule", "error_category", "failure_stage", "flow_id", "creator_email"):
+    for key in ("error_rule", "error_category", "failure_stage", "flow_id", "creator_email",
+                "schema_drift"):
         val = request.args.get(key, "").strip()
         if val:
             filters[key] = val

@@ -118,7 +118,7 @@ function ovFilterChips() {
 /* Hand the current slice to the All Jobs tab, where the individual runs live. */
 function ovViewInAllJobs(extra) {
     const handoff = {};
-    ["error_category", "error_rule", "failure_stage", "flow_id"].forEach(k => {
+    ["error_category", "error_rule", "failure_stage", "flow_id", "schema_drift"].forEach(k => {
         if (ovFilters[k]) handoff[k] = ovFilters[k];
     });
     Object.assign(handoff, extra || {});

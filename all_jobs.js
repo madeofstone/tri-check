@@ -394,7 +394,8 @@ function _ajRenderHandoffChip() {
     if (!bar) return;
     if (!_ajHandoff) { bar.style.display = "none"; bar.innerHTML = ""; return; }
     const labels = { error_category: "Category", error_rule: "Cause",
-                     failure_stage: "Stage", flow_id: "Flow", error_signature: "Error" };
+                     failure_stage: "Stage", flow_id: "Flow", error_signature: "Error",
+                     schema_drift: "Schema drift" };
     const chips = Object.entries(_ajHandoff)
         .filter(([k]) => labels[k])
         .map(([k, v]) => `<span class="ov-chip">${labels[k]}: <strong>${esc(String(v).slice(0, 70))}</strong></span>`)
