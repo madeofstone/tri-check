@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_detail    TEXT,
     error_message_id INTEGER,
     error_signature TEXT,
+    -- Schema drift is advisory: it reports that the source schema changed but
+    -- does not stop the transformation, so it is tracked apart from the cause.
+    schema_drift    INTEGER DEFAULT 0,
     enriched_at     TEXT
 );
 
@@ -133,6 +136,7 @@ MIGRATIONS = [
     ("jobs", "error_message_id", "INTEGER"),
     ("jobs", "enriched_at", "TEXT"),
     ("jobs", "error_signature", "TEXT"),
+    ("jobs", "schema_drift", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -154,6 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_error_rule ON jobs(error_rule);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_enriched ON jobs(status, enriched_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_error_signature ON jobs(error_signature);
+CREATE INDEX IF NOT EXISTS idx_jobs_schema_drift ON jobs(schema_drift);
 """
 
 
@@ -754,13 +759,15 @@ def save_failure_details(job_id: int, details: dict):
             UPDATE jobs SET
                 failure_stage = ?, error_rule = ?, error_title = ?, error_category = ?,
                 error_type = ?, error_label = ?, error_code = ?, error_why = ?,
-                error_detail = ?, error_message_id = ?, error_signature = ?, enriched_at = ?
+                error_detail = ?, error_message_id = ?, error_signature = ?,
+                schema_drift = ?, enriched_at = ?
             WHERE job_id = ?
         """, (
             details.get("failureStage"), details.get("ruleId"), details.get("title"),
             details.get("category"), details.get("exceptionType"), details.get("exceptionLabel"),
             details.get("errorCode"), details.get("why"), details.get("detail"),
-            details.get("errorMessageId"), details.get("signature"), now, int(job_id),
+            details.get("errorMessageId"), details.get("signature"),
+            1 if details.get("schemaDrift") else 0, now, int(job_id),
         ))
 
 
@@ -787,7 +794,8 @@ def _failure_scope(since: str, until: Optional[str], filters: Optional[dict],
     if until:
         where.append("created_at < ?")
         params.append(until)
-    for col in ("error_rule", "error_category", "failure_stage", "flow_id", "error_signature"):
+    for col in ("error_rule", "error_category", "failure_stage", "flow_id",
+                "error_signature", "schema_drift"):
         if filters and filters.get(col):
             where.append(f"{col} = ?")
             params.append(filters[col])
@@ -807,7 +815,8 @@ def dashboard_summary(since: str, source: str = "aacp", until: Optional[str] = N
                        0 AS canceled, 0 AS running,
                        COUNT(DISTINCT flow_id) AS flows,
                        COUNT(DISTINCT creator_email) AS users,
-                       SUM(execution_time_min) AS failed_minutes
+                       SUM(execution_time_min) AS failed_minutes,
+                       SUM(COALESCE(schema_drift, 0)) AS schema_drift
                 FROM jobs WHERE {where}
             """, params).fetchone()
     else:
@@ -822,7 +831,8 @@ def dashboard_summary(since: str, source: str = "aacp", until: Optional[str] = N
                        SUM(status IN ('InProgress', 'Created')) AS running,
                        COUNT(DISTINCT flow_id) AS flows,
                        COUNT(DISTINCT creator_email) AS users,
-                       SUM(CASE WHEN status = 'Failed' THEN execution_time_min ELSE 0 END) AS failed_minutes
+                       SUM(CASE WHEN status = 'Failed' THEN execution_time_min ELSE 0 END) AS failed_minutes,
+                       SUM(COALESCE(schema_drift, 0)) AS schema_drift
                 FROM jobs WHERE {clause}
             """, params).fetchone()
     d = {k: (row[k] or 0) for k in row.keys()}
@@ -1103,3 +1113,23 @@ def database_stats() -> dict:
         ).fetchone()
     return {"jobs": row["jobs"] or 0, "oldest": row["oldest"], "newest": row["newest"],
             "dbBytes": size}
+
+
+def clear_enrichment(failure_stage: Optional[str] = None, source: str = "aacp") -> int:
+    """
+    Mark enriched failures for re-enrichment.
+
+    Attribution and the schema-drift flag are derived from the stage list, which
+    is not stored, so correcting them means re-reading those job groups from
+    AAC. Clearing enriched_at puts them back in the normal enrichment queue.
+    """
+    where = ["source = ?", "status = 'Failed'", "enriched_at IS NOT NULL"]
+    params: list[Any] = [source]
+    if failure_stage:
+        where.append("failure_stage = ?")
+        params.append(failure_stage)
+    with get_db() as conn:
+        cur = conn.execute(f"UPDATE jobs SET enriched_at = NULL WHERE {' AND '.join(where)}", params)
+        n = cur.rowcount or 0
+    log.info(f"Cleared enrichment on {n} failures (stage={failure_stage or 'all'})")
+    return n

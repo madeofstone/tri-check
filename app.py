@@ -843,7 +843,7 @@ def _dashboard_scope(args) -> tuple[str, Optional[str], dict, dict]:
         until = args["to"]
 
     filters = {}
-    for key in ("error_category", "error_rule", "failure_stage", "flow_id"):
+    for key in ("error_category", "error_rule", "failure_stage", "flow_id", "schema_drift"):
         val = (args.get(key) or "").strip()
         if val:
             filters[key] = val
@@ -948,6 +948,8 @@ def job_detail(job_id):
     for job in inner:
         parsed = classifier.parse_error_message(job.get("errorMessage"))
         has_error = bool(job.get("errorMessage"))
+        job_type = (job.get("jobType") or "").lower()
+        is_cascade = (parsed.get("exceptionType") or "").lower() == "upstreamjobfailed"
         stages.append({
             "id": job.get("id"),
             "jobType": job.get("jobType"),
@@ -958,6 +960,11 @@ def job_detail(job_id):
             "percentComplete": job.get("percentComplete"),
             "hasWarnings": job.get("hasWarnings"),
             "isRootFailure": bool(root and job.get("id") == root.get("id")),
+            # Advisory: schema drift reports a source change but does not stop
+            # the transformation. Cascade: skipped because an earlier stage
+            # failed. Neither should read as the thing to investigate.
+            "isAdvisory": job_type in classifier.ADVISORY_STAGES,
+            "isCascade": is_cascade,
             "errorType": parsed.get("exceptionType") if has_error else None,
             "errorWhy": parsed.get("why") if has_error else None,
             "errorMessage": parsed.get("message") if has_error else None,
@@ -965,11 +972,14 @@ def job_detail(job_id):
     stages.sort(key=lambda s: (STAGE_ORDER.get((s["jobType"] or "").lower(), 99),
                                s.get("startedAt") or ""))
 
+    schema_drift = classifier.has_advisory_failure(inner)
+
     failure = None
     if root is not None:
         parsed = classifier.parse_error_message(root.get("errorMessage"))
-        result = classifier.classify(parsed)
-        failure = {**result, "stage": root.get("jobType"),
+        root_is_advisory = (root.get("jobType") or "").lower() in classifier.ADVISORY_STAGES
+        result = classifier.advisory_result() if root_is_advisory else classifier.classify(parsed)
+        failure = {**result, "stage": root.get("jobType"), "advisory": root_is_advisory,
                  "exceptionType": parsed.get("exceptionType"),
                  "exceptionLabel": parsed.get("exceptionLabel"),
                  "errorCode": parsed.get("errorCode"),
@@ -992,6 +1002,7 @@ def job_detail(job_id):
     return jsonify({
         "job": stored,
         "stages": stages,
+        "schemaDrift": schema_drift,
         # NOT "error": that key is reserved for API failures, and the UI treats
         # any truthy `error` as a failed request.
         "failure": failure,
@@ -1114,6 +1125,25 @@ def reclassify_failures():
     body = request.get_json(silent=True) or {}
     result = aac_sync.reclassify(only_unclassified=not body.get("all"))
     return jsonify(result)
+
+
+@app.route("/api/reenrich", methods=["POST"])
+def reenrich_failures():
+    """
+    Queue stored failures to be read from AAC again.
+
+    Needed when the stage list matters — root-cause attribution and the
+    schema-drift flag come from it and are not stored. Pass {"stage": "..."} to
+    limit the scope, or {"all": true} for every failure. The next sync does the
+    work; pass {"sync": true} to start one immediately.
+    """
+    body = request.get_json(silent=True) or {}
+    stage = body.get("stage")
+    if not stage and not body.get("all"):
+        return jsonify({"error": "pass {\"all\": true} or {\"stage\": \"<stage>\"}"}), 400
+    queued = db.clear_enrichment(failure_stage=stage)
+    started = aac_sync.run_sync() if body.get("sync") else {"started": False}
+    return jsonify({"queued": queued, "sync": started})
 
 
 @app.route("/api/error-rules", methods=["GET"])

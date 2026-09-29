@@ -710,6 +710,11 @@ function ajRenderDetail(d) {
 
         ${d.warnings && d.warnings.length ? `<div class="aj-detail-warn">${d.warnings.map(esc).join("<br>")}</div>` : ""}
 
+        ${d.schemaDrift && !(err && err.advisory) ? `<div class="aj-detail-drift">
+            Schema drift was also reported on this run. Drift checks do not stop the
+            transformation, so it is not the reason this job failed.
+        </div>` : ""}
+
         <div class="aj-detail-cols">
             <div class="aj-detail-col">
                 <div class="aj-detail-label">Stages</div>
@@ -739,19 +744,33 @@ function ajFact(label, value) {
 }
 
 /* Pipeline stages in execution order, with the stage that actually failed
-   marked — the cascade stages around it are not the thing to investigate. */
+   marked. Two kinds of failure are deliberately not marked as the cause:
+   cascades (skipped because an earlier stage failed) and schema drift, which
+   reports a source change but does not stop the transformation. */
 function ajStagesTable(stages) {
     if (!stages || !stages.length) {
         return `<div class="aj-detail-dim">AAC returned no stage detail for this job.</div>`;
     }
+    const flag = s => {
+        if (s.isRootFailure) return `<span class="aj-flag-root">failed here</span>`;
+        if (s.isAdvisory && s.status === "Failed") return `<span class="aj-flag-advisory">drift reported</span>`;
+        if (s.isCascade) return `<span class="aj-flag-cascade">skipped</span>`;
+        if (s.hasWarnings) return `<span class="aj-flag-warn">warnings</span>`;
+        return "";
+    };
+    const rowClass = s => {
+        if (s.isRootFailure) return "aj-stage-root";
+        if (s.isAdvisory && s.status === "Failed") return "aj-stage-advisory";
+        return "";
+    };
     return `<table class="ov-table ov-table-tight aj-stages"><thead><tr>
             <th>Stage</th><th>Status</th><th class="num">Duration</th><th></th>
         </tr></thead><tbody>
-        ${stages.map(s => `<tr class="${s.isRootFailure ? "aj-stage-root" : ""}">
+        ${stages.map(s => `<tr class="${rowClass(s)}">
             <td>${esc(s.jobType || "—")}</td>
             <td>${statusBadge(s.status)}</td>
             <td class="num">${s.durationSeconds != null ? ajDuration(s.durationSeconds) : "—"}</td>
-            <td class="aj-stage-flag">${s.isRootFailure ? "failed here" : (s.hasWarnings ? "warnings" : "")}</td>
+            <td class="aj-stage-flag">${flag(s)}</td>
         </tr>`).join("")}
     </tbody></table>`;
 }

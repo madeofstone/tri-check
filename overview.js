@@ -59,7 +59,7 @@ async function ovLoad(window) {
 
 const OV_FILTER_LABELS = {
     error_category: "Category", error_rule: "Cause", failure_stage: "Stage",
-    flow_id: "Flow", from: "From", to: "To",
+    flow_id: "Flow", from: "From", to: "To", schema_drift: "Schema drift",
 };
 
 function ovSetFilter(key, value) {
@@ -103,6 +103,7 @@ function ovFilterChips() {
         if (k === "from") {
             value = `${ovShortTime(ovFilters.from)} → ${ovShortTime(ovFilters.to)}`;
         }
+        if (k === "schema_drift") value = "reported";
         if (k === "flow_id" && ovData) {
             const hit = ovData.topFlows.find(f => String(f.flow_id) === String(value));
             if (hit) value = hit.flow_name;
@@ -145,6 +146,8 @@ function ovRender(d) {
             ${ovKpi("Failed", fmtNum(s.failed), s.canceled ? `${fmtNum(s.canceled)} canceled` : "", "bad")}
             ${ovKpi("Distinct flows", fmtNum(s.flows), `${fmtNum(s.users)} users`)}
             ${ovKpi("Compute wasted", `${fmtNum(s.wastedHours)}h`, "time spent on runs that failed")}
+            ${ovKpi("Schema drift", fmtNum(s.schema_drift || 0), "reported, not counted as a cause",
+                    null, "ovSetFilter('schema_drift', '1')")}
         </div>
 
         <section class="ov-card ov-card-wide">
@@ -211,8 +214,9 @@ function ovRender(d) {
     ovRenderSync(d.sync);
 }
 
-function ovKpi(label, value, sub, tone) {
-    return `<div class="ov-kpi ${tone ? "ov-kpi-" + tone : ""}">
+function ovKpi(label, value, sub, tone, onClick) {
+    const clickable = onClick ? ` ov-kpi-clickable" onclick="${onClick}` : "";
+    return `<div class="ov-kpi ${tone ? "ov-kpi-" + tone : ""}${clickable}">
         <span class="ov-kpi-label">${esc(label)}</span>
         <span class="ov-kpi-value">${esc(String(value))}</span>
         <span class="ov-kpi-sub">${esc(sub || "")}</span>

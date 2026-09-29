@@ -328,3 +328,23 @@
 @media (max-width: 900px) {
     .aj-detail-cols { flex-direction: column; }
 }
+
+/* Schema drift is advisory: reported, never styled as the failure. */
+.ov-kpi-clickable { cursor: pointer; }
+.ov-kpi-clickable:hover { border-color: var(--border-medium); background: var(--bg-elevated); }
+
+.aj-detail-drift {
+    background: var(--amber-bg);
+    border-left: 3px solid var(--amber);
+    border-radius: var(--radius-sm);
+    padding: 9px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.aj-stage-advisory td { background: var(--amber-bg); }
+.aj-flag-root     { font-size: 10px; color: var(--red);   text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; }
+.aj-flag-advisory { font-size: 10px; color: var(--amber); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; }
+.aj-flag-cascade  { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.aj-flag-warn     { font-size: 10px; color: var(--amber); text-transform: uppercase; letter-spacing: 0.03em; }

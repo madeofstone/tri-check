@@ -251,5 +251,11 @@
     "title": "Unclassified",
     "category": "Unclassified",
     "hint": "No rule matched yet. Open a few of these and add a rule to error_rules.json."
+  },
+  "advisory": {
+    "id": "schema_drift",
+    "title": "Schema drift reported",
+    "category": "Schema drift",
+    "hint": "The source schema changed. Drift checks do not stop the transformation, so this is a notification rather than a failure \u2014 review whether the recipe still matches the source."
   }
 }

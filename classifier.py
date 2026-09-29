@@ -24,6 +24,7 @@ RULES_FILE = Path(__file__).resolve().parent / "error_rules.json"
 
 _rules: list[dict] = []
 _fallback: dict = {}
+_advisory: dict = {}
 
 
 def _compile(rule: dict) -> dict:
@@ -37,13 +38,15 @@ def _compile(rule: dict) -> dict:
 
 def load_rules(force: bool = False) -> list[dict]:
     """Load and compile the rule file (cached)."""
-    global _rules, _fallback
+    global _rules, _fallback, _advisory
     if _rules and not force:
         return _rules
     data = json.loads(RULES_FILE.read_text())
     _rules = [_compile(r) for r in data.get("rules", [])]
     _fallback = data.get("unclassified", {"id": "unclassified", "title": "Unclassified",
                                           "category": "Unclassified", "hint": ""})
+    _advisory = data.get("advisory", {"id": "schema_drift", "title": "Schema drift reported",
+                                      "category": "Schema drift", "hint": ""})
     log.info(f"Loaded {len(_rules)} classification rules")
     return _rules
 
@@ -103,6 +106,12 @@ def classify(parsed: dict) -> dict:
     return _result(_fallback)
 
 
+def advisory_result() -> dict:
+    """Classification for a group whose only failure was an advisory stage."""
+    load_rules()
+    return _result(_advisory)
+
+
 def _result(rule: dict) -> dict:
     return {
         "ruleId": rule.get("id"),
@@ -112,15 +121,37 @@ def _result(rule: dict) -> dict:
     }
 
 
-def pick_root_failure(inner_jobs: list[dict]) -> Optional[dict]:
+ADVISORY_STAGES = {"schemadrift"}
+"""
+Stages whose failure does not stop the pipeline.
+
+Schema drift only reports whether the source schema changed; the transformation
+runs regardless. Treating its failure as the cause of a job group hides the real
+one — in every sampled case where drift failed, the wrangle stage had also
+failed with its own independent error.
+"""
+
+
+def has_advisory_failure(inner_jobs: list[dict]) -> bool:
+    """Whether any advisory stage failed, regardless of what caused the group to fail."""
+    return any((j.get("jobType") or "").lower() in ADVISORY_STAGES
+               and (j.get("status") or "").lower() == "failed"
+               for j in (inner_jobs or []))
+
+
+def pick_root_failure(inner_jobs: list[dict], include_advisory: bool = True) -> Optional[dict]:
     """
     Choose the job that actually caused the group to fail.
 
-    A failed group usually has several failed inner jobs: the real one plus
-    UpstreamJobFailed cascades. 27% of failed inner jobs in the sampled corpus
-    were cascades, so counting them all would badly skew the stage breakdown.
-    Prefer a failed job whose error is not an upstream cascade, in pipeline
-    order; fall back to the first failed job if every one is a cascade.
+    A failed group usually has several failed inner jobs. Two kinds are not the
+    cause and are skipped when anything else failed:
+
+      * UpstreamJobFailed cascades — 27% of failed inner jobs in the sampled
+        corpus, and always a consequence of an earlier stage.
+      * advisory stages (schema drift) — non-blocking by design.
+
+    Only when an advisory stage is the *sole* failure is it returned as the
+    cause, and then `include_advisory` lets callers opt out entirely.
     """
     ORDER = {"ingest": 0, "schemadrift": 1, "wrangle": 2, "profile": 3,
              "filewriter": 4, "publish": 5}
@@ -128,11 +159,22 @@ def pick_root_failure(inner_jobs: list[dict]) -> Optional[dict]:
     if not failed:
         return None
     failed.sort(key=lambda j: ORDER.get((j.get("jobType") or "").lower(), 99))
-    for job in failed:
+
+    def is_cascade(job) -> bool:
         etype = ((job.get("errorMessage") or {}).get("exceptionType") or "").lower()
-        if etype != "upstreamjobfailed":
+        return etype == "upstreamjobfailed"
+
+    def is_advisory(job) -> bool:
+        return (job.get("jobType") or "").lower() in ADVISORY_STAGES
+
+    for job in failed:
+        if not is_cascade(job) and not is_advisory(job):
             return job
-    return failed[0]
+    # Nothing but cascades and advisory failures left.
+    for job in failed:
+        if not is_cascade(job):
+            return job if include_advisory else None
+    return failed[0] if include_advisory else None
 
 
 # ---------------------------------------------------------------------------

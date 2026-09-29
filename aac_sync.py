@@ -145,17 +145,20 @@ def _enrich_failures(api: PlatformAPI, limit: int = ENRICH_BATCH) -> int:
                 continue
             inner = (detail.get("jobs") or {}).get("data") or []
             root = classifier.pick_root_failure(inner)
+            drift = classifier.has_advisory_failure(inner)
             if root is None:
                 # Nothing failed inside the group (or AAC returned nothing usable).
                 # Mark it enriched anyway so it does not get retried forever.
                 db.save_failure_details(job_id, {"failureStage": None, "ruleId": "no_failed_stage",
                                                  "title": "No failed stage reported",
-                                                 "category": "Unclassified"})
+                                                 "category": "Unclassified",
+                                                 "schemaDrift": drift})
                 done += 1
                 continue
 
             parsed = classifier.parse_error_message(root.get("errorMessage"))
-            result = classifier.classify(parsed)
+            root_is_advisory = (root.get("jobType") or "").lower() in classifier.ADVISORY_STAGES
+            result = classifier.advisory_result() if root_is_advisory else classifier.classify(parsed)
             db.save_failure_details(job_id, {
                 "failureStage": root.get("jobType"),
                 "ruleId": result["ruleId"], "title": result["title"], "category": result["category"],
@@ -164,6 +167,7 @@ def _enrich_failures(api: PlatformAPI, limit: int = ENRICH_BATCH) -> int:
                 "detail": (parsed.get("message") or "")[:4000],
                 "errorMessageId": parsed.get("errorMessageId"),
                 "signature": classifier.signature(parsed),
+                "schemaDrift": drift,
             })
             done += 1
             _set(enriched=_state["enriched"] + 1,
