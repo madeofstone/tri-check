@@ -74,6 +74,21 @@ Tokens can also be set from the gear icon in the app rather than by editing
 4. Click **Download Event Log** to analyze Spark performance
 5. Click **➜ Dashboard** to view the interactive performance dashboard
 
+## For developers and agents
+
+Working documents live in [`.agents/`](.agents/) and are committed so they travel
+with the branch:
+
+- [`.agents/architecture.md`](.agents/architecture.md) — what the app does, where
+  the code lives, and the AAC/Databricks behaviours that are not guessable from
+  the source
+- [`.agents/conventions.md`](.agents/conventions.md) — how to change things safely
+- [`.agents/decisions.md`](.agents/decisions.md) — why the design is as it is
+- [`.agents/handoff.md`](.agents/handoff.md) — current state and open questions
+
+`AGENTS.md`, `CLAUDE.md` and `GEMINI.md` at the repo root point coding agents at
+the same docs. Copy `.agents/features/TEMPLATE/` for a new piece of work.
+
 ## Project Structure
 
 ```
