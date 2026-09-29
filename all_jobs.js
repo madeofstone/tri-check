@@ -681,7 +681,7 @@ async function ajToggleDetail(btn, jobId) {
 
     try {
         const data = await (await fetch(`${API_BASE}/api/job/${jobId}/detail`)).json();
-        if (data.error) throw new Error(data.error);
+        if (typeof data.error === "string") throw new Error(data.error);
         detail.querySelector(".aj-detail-cell").innerHTML = ajRenderDetail(data);
         ajProbeDbxLogs(jobId);
     } catch (e) {
@@ -692,7 +692,7 @@ async function ajToggleDetail(btn, jobId) {
 
 function ajRenderDetail(d) {
     const j = d.job || {};
-    const err = d.error;
+    const err = d.failure;
 
     return `<div class="aj-detail">
         <div class="aj-detail-facts">

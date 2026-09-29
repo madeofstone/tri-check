@@ -963,11 +963,11 @@ def job_detail(job_id):
     stages.sort(key=lambda s: (STAGE_ORDER.get((s["jobType"] or "").lower(), 99),
                                s.get("startedAt") or ""))
 
-    error = None
+    failure = None
     if root is not None:
         parsed = classifier.parse_error_message(root.get("errorMessage"))
         result = classifier.classify(parsed)
-        error = {**result, "stage": root.get("jobType"),
+        failure = {**result, "stage": root.get("jobType"),
                  "exceptionType": parsed.get("exceptionType"),
                  "exceptionLabel": parsed.get("exceptionLabel"),
                  "errorCode": parsed.get("errorCode"),
@@ -990,7 +990,9 @@ def job_detail(job_id):
     return jsonify({
         "job": stored,
         "stages": stages,
-        "error": error,
+        # NOT "error": that key is reserved for API failures, and the UI treats
+        # any truthy `error` as a failed request.
+        "failure": failure,
         "inputs": io.get("inputs"),
         "outputs": io.get("outputs"),
         "databricks": {
