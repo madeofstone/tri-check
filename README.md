@@ -47,10 +47,24 @@ calls that workspace, so the two can never drift apart.
 ### 3. Run
 
 ```bash
-python app.py
+./tri-track.sh start      # runs in the background, gives the terminal back
 ```
 
 Open **http://localhost:5050** in your browser.
+
+| Command | Does |
+| --------------------- | ------------------------------------------- |
+| `./tri-track.sh start` | Start in the background (installs deps on first run) |
+| `./tri-track.sh stop` | Stop it |
+| `./tri-track.sh restart` | Stop, then start |
+| `./tri-track.sh status` | Whether it is running, plus last sync |
+| `./tri-track.sh logs` | Follow the log |
+
+Use another port with `PORT=5060 ./tri-track.sh start`. The app listens on
+localhost only; set `HOST=0.0.0.0` to expose it on the network deliberately.
+
+Tokens can also be set from the gear icon in the app rather than by editing
+`.env` by hand.
 
 ## Usage
 

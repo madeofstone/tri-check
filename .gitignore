@@ -13,6 +13,10 @@ jobs/
 .env copy
 !.env.example
 
+# ---- App runtime -------------------------------------------
+tri-track.log
+.tri-track.pid
+
 # ---- Python cache ------------------------------------------
 __pycache__/
 *.pyc

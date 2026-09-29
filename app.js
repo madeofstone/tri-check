@@ -31,26 +31,35 @@ const settingsModal  = document.getElementById("settingsModal");
 const settingsBody   = document.getElementById("settingsBody");
 
 // ---- Init -------------------------------------------------
-document.getElementById("addFlowBtn").addEventListener("click", openAddFlowModal);
-document.getElementById("addFlowCancel").addEventListener("click", closeAddFlowModal);
-document.getElementById("addFlowCancelBtn").addEventListener("click", closeAddFlowModal);
-document.getElementById("addFlowConfirm").addEventListener("click", confirmAddFlow);
-document.getElementById("settingsBtn").addEventListener("click", openSettings);
-document.getElementById("settingsClose").addEventListener("click", closeSettings);
-document.getElementById("settingsCancelBtn").addEventListener("click", closeSettings);
-document.getElementById("settingsSaveBtn").addEventListener("click", saveSettings);
-collectBtn.addEventListener("click", collectRuns);
+// Bind only if the element is present. Some of these belong to panels that no
+// longer exist; a missing one must not throw and abort the rest of this file's
+// initialisation, which is what silently killed the settings dialog.
+function bind(idOrEl, event, handler) {
+    const el = typeof idOrEl === "string" ? document.getElementById(idOrEl) : idOrEl;
+    if (el) el.addEventListener(event, handler);
+    return !!el;
+}
+
+bind("addFlowBtn", "click", openAddFlowModal);
+bind("addFlowCancel", "click", closeAddFlowModal);
+bind("addFlowCancelBtn", "click", closeAddFlowModal);
+bind("addFlowConfirm", "click", confirmAddFlow);
+bind("settingsBtn", "click", openSettings);
+bind("settingsClose", "click", closeSettings);
+bind("settingsCancelBtn", "click", closeSettings);
+bind("settingsSaveBtn", "click", saveSettings);
+bind(collectBtn, "click", collectRuns);
 
 // Enter key in add-flow input
-newFlowInput.addEventListener("keydown", (e) => {
+bind(newFlowInput, "keydown", (e) => {
     if (e.key === "Enter") confirmAddFlow();
 });
 
 // Close modals on backdrop click
-addFlowModal.addEventListener("click", (e) => {
+bind(addFlowModal, "click", (e) => {
     if (e.target === addFlowModal) closeAddFlowModal();
 });
-settingsModal.addEventListener("click", (e) => {
+bind(settingsModal, "click", (e) => {
     if (e.target === settingsModal) closeSettings();
 });
 
@@ -681,26 +690,20 @@ function formatDateTime(iso) {
 }
 
 // ---- Settings Modal ---------------------------------------
+// The on-prem Trifacta section is intentionally absent: this build tracks AAC
+// only. Its keys still exist server-side so an older .env stays valid.
 const SETTINGS_CONFIG = [
     { section: "Alteryx Analytics Cloud", keys: [
         { key: "PLATFORM_API_BASE_URL", label: "Base URL", type: "text" },
         { key: "PLATFORM_API_TOKEN", label: "API Token", type: "password" },
     ]},
-    { section: "On-Prem Trifacta", toggleKey: "ONPREM_ENABLED", keys: [
-        { key: "ONPREM_API_BASE_URL", label: "Base URL", type: "text" },
-        { key: "ONPREM_API_TOKEN", label: "API Token", type: "password" },
-    ]},
     { section: "Databricks", keys: [
         { key: "DATABRICKS_TOKEN", label: "PAT Token", type: "password" },
     ]},
-    { section: "Query Settings", keys: [
+    { section: "Sync", keys: [
+        { key: "RETENTION_DAYS", label: "Days of history to keep", type: "number" },
         { key: "DEFAULT_LIMIT", label: "Default Limit", type: "number" },
         { key: "RANFOR_FILTER", label: "Ranfor Filter", type: "text" },
-        { key: "MATCH_STRATEGY", label: "Match Strategy", type: "select", options: [
-            { value: "time_and_name", text: "Time and Name" },
-            { value: "name_only", text: "Name Only (Ordered matching)" }
-        ]},
-        { key: "MATCH_WINDOW_MINUTES", label: "Match Window (min, if Time & Name)", type: "number" },
     ]},
 ];
 

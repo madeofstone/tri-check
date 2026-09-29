@@ -1186,5 +1186,18 @@ db.init_db()
 db.migrate_from_files()
 
 if __name__ == "__main__":
-    print("🚀 Tri-Tracker starting on http://localhost:5050")
-    app.run(host="0.0.0.0", port=5050, debug=True)
+    # Defaults are deliberately conservative for something handed to a customer:
+    #   - loopback only, so the dashboard and its tokens are not served to the
+    #     whole network; set HOST=0.0.0.0 to share it deliberately
+    #   - debug off, since Werkzeug's debugger allows code execution in-browser
+    #     on any traceback, and its reloader restarts the server mid-request
+    port = int(os.getenv("PORT", "5050"))
+    host = os.getenv("HOST", "127.0.0.1")
+    debug = os.getenv("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s %(name)s  %(message)s",
+    )
+    print(f"🚀 Tri-Tracker starting on http://localhost:{port}")
+    app.run(host=host, port=port, debug=debug)

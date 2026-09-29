@@ -616,3 +616,9 @@ async function ovLoadHints() {
         (rules.rules || []).forEach(r => { if (r.hint) OV_HINTS[r.id] = r.hint; });
     } catch (_) { /* hints are a nicety; the dashboard works without them */ }
 }
+
+// The Dashboard is the default tab, so it loads on startup rather than waiting
+// for a tab switch.
+if (document.getElementById("ovContent")) {
+    ovInit();
+}
