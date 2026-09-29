@@ -1,5 +1,5 @@
 {
-  "_comment": "Ordered failure-classification rules. First match wins. Derived from 600 enriched failures sampled across 14 days on the IQVIA tenant (Sept 2026). Each rule matches on any of: exceptionType, exceptionLabel, a regex over details.why, or a regex over the raw message. Add new rules ABOVE 'upstream_cascade'; anything unmatched lands in 'unclassified' and is surfaced on the dashboard so the gap stays visible.",
+  "_comment": "Ordered failure-classification rules. First match wins. Derived from 600 enriched failures sampled across 14 days on a production tenant (Sept 2026). Each rule matches on any of: exceptionType, exceptionLabel, a regex over details.why, or a regex over the raw message. Add new rules ABOVE 'upstream_cascade'; anything unmatched lands in 'unclassified' and is surfaced on the dashboard so the gap stays visible.",
   "rules": [
     {
       "id": "credentials_expired",

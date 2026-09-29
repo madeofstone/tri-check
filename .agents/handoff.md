@@ -6,7 +6,7 @@ never edit past entries.
 ## Current State
 
 **As of:** 2026-09-29
-**Branch:** `tri-check` (not yet pushed to a remote)
+**Branch:** `tri-track-triage`
 
 **What's built and working**
 
@@ -28,8 +28,9 @@ re-read, 5 permanently unreadable.
 
 **Immediate next action**
 
-Push `tri-check` to a new GitHub branch and share with the customer. Nothing is
-blocking that.
+Share the branch with the customer. The two items needing them rather than code
+are in Open Questions below: the Databricks PAT scope, and the expired
+connection credential dominating the dashboard.
 
 ---
 
@@ -57,19 +58,21 @@ blocking that.
 
 ## Environment notes
 
-- Tenant during development: IQVIA, `eu1.alteryxcloud.com`, ~3,000 job groups/day
-- Failure rate observed: 18–27% depending on window
-- **Live issue on the tenant:** an expired OAuth connection credential has been
-  failing since 2026-09-17 and now dominates the dashboard (thousands of
-  failures). It is a real customer problem, not a tool artifact — say so before
-  anyone sees the dashboard cold.
+- Built against a production AAC tenant running ~3,000 job groups/day — the
+  volume the design assumes
+- Failure rate observed there: 18–27% depending on the window
+- **A live platform issue was present throughout development:** an expired OAuth
+  connection credential, failing since 2026-09-17, came to dominate the
+  dashboard (thousands of failures). Worth knowing because it is a real tenant
+  problem rather than a tool artifact — if a single cause overwhelms the
+  dashboard, check whether that is genuinely happening before assuming a bug.
 
 ---
 
 ## Session Log
 
 ### Session 1 — 2026-09-22 — Revival and Databricks linkage
-- Resolved a committed merge conflict in `.gitignore`; cut branch `tri-check`
+- Resolved a committed merge conflict in `.gitignore`; cut the working branch
 - Fixed the AAC→Databricks link: select the `wrangle` stage by type (was
   `data[0]`, null on 95/96 jobs); established that `databricksJobId` is a run id
 - Removed `DATABRICKS_HOST` from config in favour of the per-job workspace URL
@@ -96,6 +99,12 @@ blocking that.
 - Fixed the enrichment loop stopping early; re-read all 11,340 failures
 - Added `tri-track.sh`; app now defaults to loopback with debug off
 
-### Session 5 — 2026-09-29 — Agent workspace
+### Session 5 — 2026-09-29 — Agent workspace and handover prep
 - Added `.agents/` (this workspace), committed rather than gitignored so it
   reaches the customer and other branches
+- All Jobs: the whole row opens the job detail; the DBX column became an
+  indicator and its panel moved inside the detail
+- Generalised tenant-identifying detail in the docs ahead of publishing
+- Renamed the branch to `tri-track-triage` and pushed it to GitHub. `master`
+  keeps the original Spark-tuning tool (Flow Analysis, on-prem comparison) and
+  was deliberately left untouched
