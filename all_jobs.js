@@ -448,6 +448,7 @@ function _ajRenderFlat(jobs) {
 
     head.innerHTML = `<tr>
         <th style="width: 40px;"></th>
+        <th style="width: 28px;"></th>
         <th>Job ID</th>
         <th>Status</th>
         <th>Flow Name</th>
@@ -468,6 +469,7 @@ function _ajRenderFlat(jobs) {
         const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
         return `<tr data-jobid="${j.job_id}">
             <td><input type="checkbox" class="compare-cb" value="${j.job_id}" onchange="toggleCompareCheck(this, ${j.job_id})" ${isChecked}></td>
+            <td><button class="aj-expand-btn" data-jobid="${j.job_id}" onclick="ajToggleDetail(this, ${j.job_id})" title="Job details">▸</button></td>
             <td><strong>${j.job_id}</strong></td>
             <td>${statusBadge(j.status)}</td>
             <td>${esc(j.flow_name || "—")}</td>
@@ -557,7 +559,7 @@ function _ajRenderGrouped(groups) {
 
             const isChecked = selectedCompareJobs.some(c => c.job_id === j.job_id) ? "checked" : "";
             html += `<tr class="aj-group-child ${gid}" style="display:none">
-                <td></td>
+                <td><button class="aj-expand-btn" data-jobid="${j.job_id}" onclick="ajToggleDetail(this, ${j.job_id})" title="Job details">▸</button></td>
                 <td><input type="checkbox" class="compare-cb" value="${j.job_id}" onchange="toggleCompareCheck(this, ${j.job_id})" ${isChecked}></td>
                 <td><strong>${j.job_id}</strong></td>
                 <td>${statusBadge(j.status)}</td>
@@ -650,4 +652,227 @@ async function ajToggleDbx(btn) {
 function ajInit() {
     ajLoadKpis();
     ajQueryJobs();
+}
+
+// ---------------------------------------------------------------------------
+// Job detail panel
+// ---------------------------------------------------------------------------
+
+const AJ_DETAIL_COLS = 12;
+
+async function ajToggleDetail(btn, jobId) {
+    const row = btn.closest("tr");
+    const next = row.nextElementSibling;
+
+    if (next && next.classList.contains("aj-detail-row")) {
+        next.remove();
+        btn.textContent = "▸";
+        btn.classList.remove("active");
+        return;
+    }
+
+    btn.textContent = "▾";
+    btn.classList.add("active");
+    const detail = document.createElement("tr");
+    detail.className = "aj-detail-row";
+    detail.innerHTML = `<td colspan="${AJ_DETAIL_COLS}" class="aj-detail-cell">
+        <div class="aj-detail-loading"><span class="spinner spinner-sm"></span> Loading job detail…</div></td>`;
+    row.after(detail);
+
+    try {
+        const data = await (await fetch(`${API_BASE}/api/job/${jobId}/detail`)).json();
+        if (data.error) throw new Error(data.error);
+        detail.querySelector(".aj-detail-cell").innerHTML = ajRenderDetail(data);
+        ajProbeDbxLogs(jobId);
+    } catch (e) {
+        detail.querySelector(".aj-detail-cell").innerHTML =
+            `<div class="aj-detail-error">⚠ ${esc(e.message)}</div>`;
+    }
+}
+
+function ajRenderDetail(d) {
+    const j = d.job || {};
+    const err = d.error;
+
+    return `<div class="aj-detail">
+        <div class="aj-detail-facts">
+            ${ajFact("Job group", j.job_id)}
+            ${ajFact("Flow", j.flow_name)}
+            ${ajFact("Flow ID", j.flow_id)}
+            ${ajFact("Status", j.status)}
+            ${ajFact("Triggered by", j.ran_from)}
+            ${ajFact("Ran for", j.ran_for)}
+            ${ajFact("Creator", j.creator_email)}
+            ${ajFact("Started", formatDateTime(j.created_at))}
+            ${ajFact("Runtime", j.execution_time_min != null ? `${j.execution_time_min.toFixed(1)} min` : null)}
+            ${ajFact("Engine", j.execution_language)}
+        </div>
+
+        ${d.warnings && d.warnings.length ? `<div class="aj-detail-warn">${d.warnings.map(esc).join("<br>")}</div>` : ""}
+
+        <div class="aj-detail-cols">
+            <div class="aj-detail-col">
+                <div class="aj-detail-label">Stages</div>
+                ${ajStagesTable(d.stages)}
+            </div>
+            <div class="aj-detail-col">
+                <div class="aj-detail-label">${err ? "Failure" : "Source & target"}</div>
+                ${err ? ajErrorBlock(err) : ajIoBlock(d)}
+            </div>
+        </div>
+
+        ${err ? `<div class="aj-detail-label">Source & target</div>${ajIoBlock(d)}` : ""}
+
+        <div class="aj-detail-label">Databricks logs</div>
+        <div class="aj-dbx-logs" id="ajDbxLogs-${j.job_id}">
+            ${d.databricks && d.databricks.available
+                ? `<div class="aj-detail-loading"><span class="spinner spinner-sm"></span> Checking what Databricks has…</div>`
+                : `<div class="aj-detail-dim">This job has no Databricks run recorded — it never reached Spark.</div>`}
+        </div>
+    </div>`;
+}
+
+function ajFact(label, value) {
+    if (value == null || value === "") return "";
+    return `<div class="aj-fact"><span class="aj-fact-label">${esc(label)}</span>
+        <span class="aj-fact-value">${esc(String(value))}</span></div>`;
+}
+
+/* Pipeline stages in execution order, with the stage that actually failed
+   marked — the cascade stages around it are not the thing to investigate. */
+function ajStagesTable(stages) {
+    if (!stages || !stages.length) {
+        return `<div class="aj-detail-dim">AAC returned no stage detail for this job.</div>`;
+    }
+    return `<table class="ov-table ov-table-tight aj-stages"><thead><tr>
+            <th>Stage</th><th>Status</th><th class="num">Duration</th><th></th>
+        </tr></thead><tbody>
+        ${stages.map(s => `<tr class="${s.isRootFailure ? "aj-stage-root" : ""}">
+            <td>${esc(s.jobType || "—")}</td>
+            <td>${statusBadge(s.status)}</td>
+            <td class="num">${s.durationSeconds != null ? ajDuration(s.durationSeconds) : "—"}</td>
+            <td class="aj-stage-flag">${s.isRootFailure ? "failed here" : (s.hasWarnings ? "warnings" : "")}</td>
+        </tr>`).join("")}
+    </tbody></table>`;
+}
+
+function ajDuration(seconds) {
+    if (seconds < 60) return `${seconds.toFixed(0)}s`;
+    const m = Math.floor(seconds / 60);
+    return `${m}m ${Math.round(seconds - m * 60)}s`;
+}
+
+function ajErrorBlock(err) {
+    return `<div class="aj-error-block">
+        <div class="aj-error-head">
+            <span class="aj-error-title">${esc(err.title || "Failure")}</span>
+            <span class="ov-pill">${esc(err.category || "—")}</span>
+        </div>
+        <div class="aj-error-meta">
+            ${[["Stage", err.stage], ["Exception", err.exceptionType], ["Label", err.exceptionLabel],
+               ["Code", err.errorCode]].filter(([, v]) => v).map(([k, v]) =>
+                `<span>${esc(k)}: <strong>${esc(String(v))}</strong></span>`).join("")}
+        </div>
+        ${err.hint ? `<div class="ov-msg-hint">💡 ${esc(err.hint)}</div>` : ""}
+        <pre class="ov-msg-raw">${esc(err.why || err.message || "(no message)")}</pre>
+    </div>`;
+}
+
+function ajIoBlock(d) {
+    const inputs = d.inputs && d.inputs.data ? d.inputs.data : [];
+    const outputs = d.outputs || {};
+    const tables = outputs.tables || [];
+    const files = outputs.files || [];
+    if (!inputs.length && !tables.length && !files.length) {
+        return `<div class="aj-detail-dim">No source or target detail available.</div>`;
+    }
+    const srcLines = [];
+    inputs.forEach(ds => (ds.inputs || []).forEach(i => {
+        const q = Array.isArray(i.query) ? i.query[0] : i.query;
+        srcLines.push(`${esc(ds.name || "dataset")} · ${esc(i.vendor || i.protocol || "source")}${q ? `\n    ${esc(String(q).slice(0, 220))}` : ""}`);
+    }));
+    const dstLines = [
+        ...tables.map(tb => `${esc(tb.action || "write")} · ${esc(tb.table || tb.databaseConnectString || "table")}`),
+        ...files.map(f => `${esc(f.fileType || "file")} · ${esc(f.uri || "")}`),
+    ];
+    return `<div class="aj-io">
+        ${srcLines.length ? `<div class="aj-io-group"><span class="aj-io-label">Sources</span><pre class="ov-msg-raw">${srcLines.join("\n")}</pre></div>` : ""}
+        ${dstLines.length ? `<div class="aj-io-group"><span class="aj-io-label">Targets</span><pre class="ov-msg-raw">${dstLines.join("\n")}</pre></div>` : ""}
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Databricks log bundle
+// ---------------------------------------------------------------------------
+
+/* Checked before offering the download: on this tenant a PAT can only read the
+   runs of certain AAC users, so the button would otherwise fail after a wait. */
+async function ajProbeDbxLogs(jobId) {
+    const box = document.getElementById(`ajDbxLogs-${jobId}`);
+    if (!box) return;
+    try {
+        const a = await (await fetch(`${API_BASE}/api/job/${jobId}/dbx-logs/available`)).json();
+        if (!a.available) {
+            box.innerHTML = `<div class="aj-detail-dim">⚠ ${esc(a.reason || "Logs are not available for this run.")}</div>`;
+            return;
+        }
+        const kinds = Object.entries(a.byKind || {})
+            .map(([k, v]) => `${k} (${v.files} file${v.files === 1 ? "" : "s"}, ${ajBytes(v.bytes)})`)
+            .join(" · ");
+        box.innerHTML = `
+            <div class="aj-dbx-logs-row">
+                <button class="btn-primary" onclick="ajDownloadDbxLogs(${jobId}, this)">
+                    Download DBX Job Logs (${ajBytes(a.totalBytes)})
+                </button>
+                <div class="aj-dbx-logs-meta">
+                    <div>${esc(kinds)}</div>
+                    <div class="aj-detail-dim">cluster ${esc(a.clusterId || "—")} · Spark result ${esc(a.resultState || "—")}</div>
+                </div>
+            </div>`;
+    } catch (e) {
+        box.innerHTML = `<div class="aj-detail-dim">⚠ ${esc(e.message)}</div>`;
+    }
+}
+
+function ajBytes(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+
+/* The zip is assembled server-side from DBFS, which takes a few seconds, so
+   the button reports progress rather than appearing to do nothing. */
+async function ajDownloadDbxLogs(jobId, btn) {
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner spinner-sm"></span> Collecting logs from Databricks…`;
+    try {
+        const resp = await fetch(`${API_BASE}/api/job/${jobId}/dbx-logs`);
+        if (!resp.ok) {
+            let msg = `Download failed (${resp.status})`;
+            try { msg = (await resp.json()).error || msg; } catch (_) {}
+            throw new Error(msg);
+        }
+        const blob = await resp.blob();
+        const cd = resp.headers.get("Content-Disposition") || "";
+        const match = cd.match(/filename="?([^";]+)"?/);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = match ? match[1] : `dbx-logs-${jobId}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        btn.textContent = `Downloaded (${ajBytes(blob.size)})`;
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 4000);
+    } catch (e) {
+        btn.textContent = original;
+        btn.disabled = false;
+        const box = document.getElementById(`ajDbxLogs-${jobId}`);
+        if (box) box.insertAdjacentHTML("beforeend",
+            `<div class="aj-detail-error">⚠ ${esc(e.message)}</div>`);
+    }
 }

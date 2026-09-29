@@ -1021,3 +1021,11 @@ def rows_needing_signature(limit: int = 5000, source: str = "aacp") -> list[dict
 def set_signature(job_id: int, signature: str):
     with get_db() as conn:
         conn.execute("UPDATE jobs SET error_signature = ? WHERE job_id = ?", (signature, int(job_id)))
+
+
+def get_job(job_id: int, source: str = "aacp") -> Optional[dict]:
+    """One stored job group row, or None."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id = ? AND source = ?",
+                           (int(job_id), source)).fetchone()
+    return dict(row) if row else None

@@ -9,23 +9,30 @@ Serves the web UI and provides endpoints to:
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
+import tempfile
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 from config import Config
 from platform_api import PlatformAPI, PlatformAPIError
 from databricks_client import DatabricksClient, DatabricksClientError
 from dbfs_eventlog import download_eventlog, EventLogError
+import dbx_logs
 import flow_store  # kept for eventlog_dir and list_analyzed_jobs (file-based)
+import classifier
 import db
 import aac_sync
+
+log = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)
@@ -35,6 +42,10 @@ CORS(app)
 # ---------------------------------------------------------------------------
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
+# Log bundles live OUTSIDE the project tree on purpose: the dev server runs with
+# the reloader on, and writing a zip inside the project restarts the server
+# mid-request, truncating the download.
+DBX_BUNDLE_DIR = Path(tempfile.gettempdir()) / "tri-tracker-dbx-logs"
 LEGACY_JOBS_DIR = Path(__file__).resolve().parent / "jobs"
 ANALYZER_SCRIPT = Path(__file__).resolve().parent / "eventlog-analyzer" / "analyze_eventlog.py"
 
@@ -884,6 +895,187 @@ def failure_message_detail():
         "summary": rows[0] if rows else None,
         "flows": db.signature_flows(since, signature, until=until, limit=15),
     })
+
+
+# ---------------------------------------------------------------------------
+# Job detail + Databricks log bundle
+# ---------------------------------------------------------------------------
+
+STAGE_ORDER = {"ingest": 0, "schemadrift": 1, "wrangle": 2, "profile": 3,
+               "filewriter": 4, "publish": 5}
+
+
+def _stage_seconds(started: Optional[str], finished: Optional[str]):
+    a, b = parse_iso(started or ""), parse_iso(finished or "")
+    if a and b:
+        return round((b - a).total_seconds(), 1)
+    return None
+
+
+@app.route("/api/job/<int:job_id>/detail", methods=["GET"])
+def job_detail(job_id):
+    """
+    Everything known about one job group: the stored row, every stage with its
+    status and duration, the classified error on the stage that actually failed,
+    and the source/target the run touched.
+
+    Fetched live rather than stored — the stage list is only needed when someone
+    opens a row, and it costs one call.
+    """
+    stored = db.get_job(job_id)
+    if not stored:
+        return jsonify({"error": f"job {job_id} is not in the local store"}), 404
+    if not Config.PLATFORM_API_TOKEN:
+        return jsonify({"error": "PLATFORM_API_TOKEN is not configured"}), 400
+
+    api = PlatformAPI()
+    detail, warnings = {}, []
+    try:
+        resp = api.session.get(
+            f"{api.base_url}/jobGroups/{job_id}?embed=jobs.errorMessage", timeout=60)
+        detail = resp.json() if resp.status_code == 200 else {}
+        if resp.status_code != 200:
+            warnings.append(f"AAC returned {resp.status_code} for the job group")
+    except Exception as e:
+        warnings.append(f"Could not read the job group from AAC: {e}")
+
+    inner = (detail.get("jobs") or {}).get("data") or []
+    root = classifier.pick_root_failure(inner)
+
+    stages = []
+    for job in inner:
+        parsed = classifier.parse_error_message(job.get("errorMessage"))
+        has_error = bool(job.get("errorMessage"))
+        stages.append({
+            "id": job.get("id"),
+            "jobType": job.get("jobType"),
+            "status": job.get("status"),
+            "startedAt": job.get("startedAt"),
+            "finishedAt": job.get("finishedAt"),
+            "durationSeconds": _stage_seconds(job.get("startedAt"), job.get("finishedAt")),
+            "percentComplete": job.get("percentComplete"),
+            "hasWarnings": job.get("hasWarnings"),
+            "isRootFailure": bool(root and job.get("id") == root.get("id")),
+            "errorType": parsed.get("exceptionType") if has_error else None,
+            "errorWhy": parsed.get("why") if has_error else None,
+            "errorMessage": parsed.get("message") if has_error else None,
+        })
+    stages.sort(key=lambda s: (STAGE_ORDER.get((s["jobType"] or "").lower(), 99),
+                               s.get("startedAt") or ""))
+
+    error = None
+    if root is not None:
+        parsed = classifier.parse_error_message(root.get("errorMessage"))
+        result = classifier.classify(parsed)
+        error = {**result, "stage": root.get("jobType"),
+                 "exceptionType": parsed.get("exceptionType"),
+                 "exceptionLabel": parsed.get("exceptionLabel"),
+                 "errorCode": parsed.get("errorCode"),
+                 "why": parsed.get("why"),
+                 "message": parsed.get("message"),
+                 "signature": classifier.signature(parsed)}
+
+    # Source and destination: useful for debugging, one extra call each, and
+    # non-fatal if the tenant withholds them.
+    io = {}
+    for key, path in (("inputs", f"/jobGroups/{job_id}/inputs"),
+                      ("outputs", f"/jobGroups/{job_id}/outputs")):
+        try:
+            r = api.session.get(api.base_url + path, timeout=45)
+            if r.status_code == 200:
+                io[key] = r.json()
+        except Exception:
+            pass
+
+    return jsonify({
+        "job": stored,
+        "stages": stages,
+        "error": error,
+        "inputs": io.get("inputs"),
+        "outputs": io.get("outputs"),
+        "databricks": {
+            "runId": stored.get("databricks_job_id"),
+            "jobId": stored.get("databricks_job_definition_id"),
+            "workspace": stored.get("databricks_service_url"),
+            "available": bool(stored.get("databricks_job_id") and stored.get("databricks_service_url")),
+        },
+        "warnings": warnings,
+    })
+
+
+@app.route("/api/job/<int:job_id>/dbx-logs", methods=["GET"])
+def download_dbx_logs(job_id):
+    """
+    Stream a zip of the Databricks logs for this job's Spark run:
+    driver stdout/stderr/log4j/stacktrace, the Spark event log, per-executor
+    stdout/stderr, plus the run record and cluster event timeline.
+    """
+    stored = db.get_job(job_id)
+    if not stored:
+        return jsonify({"error": f"job {job_id} is not in the local store"}), 404
+
+    run_id = stored.get("databricks_job_id")
+    host = stored.get("databricks_service_url")
+    if not run_id:
+        return jsonify({"error": "This job has no Databricks run — it never reached Spark."}), 400
+    if not host:
+        return jsonify({"error": NO_HOST_ERROR}), 400
+    if not Config.DATABRICKS_TOKEN:
+        return jsonify({"error": "DATABRICKS_TOKEN must be configured"}), 400
+
+    bundle_path = DBX_BUNDLE_DIR / f"dbx-logs-{job_id}.zip"
+    # Only reuse a cached bundle that is actually a complete zip — a partial
+    # write from an interrupted build must never be served as the logs.
+    reusable = (bundle_path.exists() and bundle_path.stat().st_size > 0
+                and zipfile.is_zipfile(bundle_path)
+                and request.args.get("refresh") != "1")
+    try:
+        if not reusable:
+            dbx_logs.build_log_bundle(
+                host=host, token=Config.DATABRICKS_TOKEN, run_id=int(run_id),
+                out_path=bundle_path,
+                job_meta={k: stored.get(k) for k in
+                          ("job_id", "flow_id", "flow_name", "status", "created_at",
+                           "creator_email", "failure_stage", "error_title", "error_category")},
+            )
+    except dbx_logs.DbxLogError as e:
+        return jsonify({"error": str(e)}), 502
+    except Exception as e:
+        log.exception("dbx log bundle failed")
+        return jsonify({"error": f"Could not build the log bundle: {e}"}), 500
+
+    flow = (stored.get("flow_name") or "job").replace("/", "_")[:60]
+    return send_file(bundle_path, as_attachment=True,
+                     download_name=f"dbx-logs-{flow}-{job_id}.zip",
+                     mimetype="application/zip")
+
+
+@app.route("/api/job/<int:job_id>/dbx-logs/available", methods=["GET"])
+def dbx_logs_available(job_id):
+    """
+    Whether logs can actually be fetched, and how big they are, so the UI can
+    say so before someone waits on a download.
+    """
+    stored = db.get_job(job_id)
+    if not stored:
+        return jsonify({"error": f"job {job_id} is not in the local store"}), 404
+    run_id, host = stored.get("databricks_job_id"), stored.get("databricks_service_url")
+    if not run_id or not host or not Config.DATABRICKS_TOKEN:
+        return jsonify({"available": False,
+                        "reason": "No Databricks run recorded for this job."})
+    try:
+        from databricks.sdk import WorkspaceClient
+        client = WorkspaceClient(host=str(host).rstrip("/"), token=Config.DATABRICKS_TOKEN)
+        ctx = dbx_logs.resolve_run_context(client, int(run_id))
+        inv = dbx_logs.list_available_logs(client, ctx.get("clusterId"))
+        return jsonify({"available": bool(inv["files"]), "clusterId": ctx.get("clusterId"),
+                        "runName": ctx.get("runName"), "resultState": ctx.get("resultState"),
+                        "byKind": inv["byKind"], "totalBytes": inv["totalBytes"],
+                        "fileCount": len(inv["files"])})
+    except dbx_logs.DbxLogError as e:
+        return jsonify({"available": False, "reason": str(e)})
+    except Exception as e:
+        return jsonify({"available": False, "reason": f"Databricks lookup failed: {e}"})
 
 
 @app.route("/api/error-rules", methods=["GET"])
