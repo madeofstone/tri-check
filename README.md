@@ -87,7 +87,7 @@ with the branch:
 - [`.agents/handoff.md`](.agents/handoff.md) — current state and open questions
 
 `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` at the repo root point coding agents at
-the same docs. Copy `.agents/features/TEMPLATE/` for a new piece of work.
+the same docs.
 
 ## Project Structure
 

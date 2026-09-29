@@ -26,8 +26,8 @@ ways that have caused real bugs.
 `.agents/decisions.md` with the reasoning, and commit with a conventional prefix
 (`feat:`, `fix:`, `refactor:`, `docs:`). Never push without being asked.
 
-For a discrete piece of work, copy `.agents/features/TEMPLATE/` to
-`.agents/features/<feature-name>/`.
+For a larger piece of work, add `.agents/features/<feature-name>/` with whatever
+notes it needs; otherwise `handoff.md` and `decisions.md` are enough.
 
 ## Running it
 

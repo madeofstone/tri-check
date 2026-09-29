@@ -15,8 +15,9 @@ context without asking.
 | [decisions.md](decisions.md) | Why the design is the way it is, with the measurements behind each choice |
 | [handoff.md](handoff.md) | Current state, open questions, session history |
 
-For a discrete piece of work, copy [features/TEMPLATE](features/TEMPLATE) to
-`features/<your-feature>/` and keep goals, strategy, decisions and handoff there.
+For a larger piece of work, add `features/<your-feature>/` with whatever notes
+it needs. For anything smaller, `handoff.md` and `decisions.md` are enough —
+prefer them over new files.
 
 ## Session start
 
