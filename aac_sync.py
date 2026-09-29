@@ -212,8 +212,13 @@ def run_sync(full: bool = False):
             backfill_signatures()
 
             _set(phase="enrich", message="classifying failures")
-            while _enrich_failures(api) >= ENRICH_BATCH:
-                pass  # keep going while full batches come back
+            # Keep going while a pass still enriches something. Comparing the
+            # count against the batch size stopped the moment a single fetch in
+            # a batch failed, which stranded the rest of the backlog: a 11,340
+            # row re-enrichment stopped at 5,717. A pass that enriches nothing
+            # means only permanently unreadable rows are left, so this ends.
+            while _enrich_failures(api) > 0:
+                pass
 
             _set(phase="purge", message="applying retention")
             purged = purge_expired()
