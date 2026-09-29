@@ -217,6 +217,26 @@
       ]
     },
     {
+      "id": "target_table_missing",
+      "title": "Target table not found",
+      "category": "Data / Schema",
+      "hint": "The table the job reads or writes does not exist in the target database. It was renamed or dropped, or the connection points at the wrong database.",
+      "exception_type": [
+        "NoSuchTableException"
+      ],
+      "message_regex": "Table not found|Could not get relation \\S+: not found"
+    },
+    {
+      "id": "target_schema_missing",
+      "title": "Target schema not found",
+      "category": "Data / Schema",
+      "hint": "The schema named by the output is missing in the target database. Check the publish target and that the connection's default database is right.",
+      "exception_type": [
+        "NoSuchSchemaException"
+      ],
+      "message_regex": "Schema not found"
+    },
+    {
       "id": "upstream_cascade",
       "title": "Failed because an upstream job failed",
       "category": "Cascade",

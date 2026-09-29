@@ -33,6 +33,10 @@ class Config:
     MATCH_WINDOW_MINUTES: int = int(os.getenv("MATCH_WINDOW_MINUTES", "10"))
     MATCH_STRATEGY: str = os.getenv("MATCH_STRATEGY", "time_and_name")
     
+    # How many days of job history to keep locally. The dashboard cannot look
+    # back further than this, and the sync purges anything older.
+    RETENTION_DAYS: int = int(os.getenv("RETENTION_DAYS", "14"))
+
     # Databricks Settings
     # NOTE: the workspace URL is not configured here. It is read per-job from the
     # AAC jobLibrary response (cpJobId.databricksServiceUrl), so we always talk to

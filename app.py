@@ -61,6 +61,7 @@ CONFIGURABLE_KEYS = [
     "RANFOR_FILTER",
     "MATCH_WINDOW_MINUTES",
     "MATCH_STRATEGY",
+    "RETENTION_DAYS",
 ]
 
 # Keys whose values should be masked when sent to the browser
@@ -152,6 +153,7 @@ def reload_config():
     Config.ONPREM_ENABLED = os.getenv("ONPREM_ENABLED", "false").lower() in ("true", "1", "yes")
     Config.RANFOR_FILTER = os.getenv("RANFOR_FILTER", "recipe,plan")
     Config.MATCH_WINDOW_MINUTES = int(os.getenv("MATCH_WINDOW_MINUTES", "10"))
+    Config.RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "14"))
 
 
 def parse_iso(ts: str) -> datetime | None:
@@ -1078,6 +1080,40 @@ def dbx_logs_available(job_id):
         return jsonify({"available": False, "reason": str(e)})
     except Exception as e:
         return jsonify({"available": False, "reason": f"Databricks lookup failed: {e}"})
+
+
+@app.route("/api/retention", methods=["GET"])
+def retention_status():
+    """Retention window, what it would drop, and how much disk the store uses."""
+    cutoff = aac_sync.window_since_days(aac_sync.RETENTION_DAYS)
+    return jsonify({
+        "retentionDays": aac_sync.RETENTION_DAYS,
+        "cutoff": cutoff,
+        "expiredJobs": db.count_jobs_older_than(cutoff),
+        "storage": db.database_stats(),
+        "lastPurgeAt": db.get_sync_state("last_purge_at"),
+        "lastPurgeCount": db.get_sync_state("last_purge_count"),
+    })
+
+
+@app.route("/api/retention/purge", methods=["POST"])
+def purge_now():
+    """Apply retention immediately rather than waiting for the next sync."""
+    deleted = aac_sync.purge_expired()
+    return jsonify({"deleted": deleted, "storage": db.database_stats()})
+
+
+@app.route("/api/reclassify", methods=["POST"])
+def reclassify_failures():
+    """
+    Re-run the classification rules over stored failures.
+
+    Use after editing error_rules.json — it reads the error text already stored,
+    so nothing is re-fetched from AAC.
+    """
+    body = request.get_json(silent=True) or {}
+    result = aac_sync.reclassify(only_unclassified=not body.get("all"))
+    return jsonify(result)
 
 
 @app.route("/api/error-rules", methods=["GET"])

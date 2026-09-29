@@ -413,6 +413,14 @@ function ovTriggerTable(rows) {
     </tbody></table>`;
 }
 
+function ovBytes(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+
 function ovShortTime(iso) {
     if (!iso) return "—";
     return iso.slice(5, 16).replace("T", " ");
@@ -432,7 +440,11 @@ function ovRenderSync(sync) {
         el.textContent = `⚠ ${sync.error}`;
         el.className = "ov-sync-status error";
     } else if (sync.lastSyncAt) {
-        el.textContent = `Synced ${ovShortTime(sync.lastSyncAt)} · ${sync.retentionDays}-day window`;
+        const st = sync.storage || {};
+        const size = st.dbBytes ? ` · ${ovBytes(st.dbBytes)}` : "";
+        const rows = st.jobs ? ` · ${fmtNum(st.jobs)} runs stored` : "";
+        el.textContent = `Synced ${ovShortTime(sync.lastSyncAt)} · keeping ${sync.retentionDays} days${rows}${size}`;
+        el.title = "Older runs are purged automatically on each sync";
         el.className = "ov-sync-status";
     } else {
         el.textContent = "Never synced — run a sync to populate the dashboard";

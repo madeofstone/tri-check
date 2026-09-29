@@ -220,3 +220,29 @@ def build_log_bundle(host: str, token: str, run_id: int, out_path: Path,
         "included": included,
         "skipped": skipped,
     }
+
+
+BUNDLE_TTL_DAYS = 7
+
+
+def purge_old_bundles(bundle_dir: Path, ttl_days: int = BUNDLE_TTL_DAYS) -> int:
+    """
+    Delete cached log zips older than the TTL.
+
+    Bundles are a few hundred KB each and are cached indefinitely once built,
+    so without this they accumulate for as long as the server runs.
+    """
+    if not bundle_dir.exists():
+        return 0
+    cutoff = datetime.now(timezone.utc).timestamp() - ttl_days * 86400
+    removed = 0
+    for f in bundle_dir.glob("dbx-logs-*.zip"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        log.info(f"Removed {removed} cached log bundles older than {ttl_days} days")
+    return removed

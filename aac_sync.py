@@ -22,13 +22,16 @@ from datetime import datetime, timedelta, timezone
 
 import classifier
 import db
+import dbx_logs
 from config import Config
 from platform_api import PlatformAPI, PlatformAPIError
 
 log = logging.getLogger(__name__)
 
 PAGE_SIZE = 1000          # verified server-side maximum that still responds quickly
-RETENTION_DAYS = 14
+RETENTION_DAYS = Config.RETENTION_DAYS
+PURGE_VACUUM_THRESHOLD = 5000   # only rewrite the file when a purge was substantial
+PURGE_GRACE_DAYS = 1            # keep a margin so the oldest chart bucket stays complete
 OVERLAP_MINUTES = 10      # re-read a little either side of the last sync
 ENRICH_BATCH = 300
 ENRICH_WORKERS = 8        # one error-message fetch per failure; the API tolerates this comfortably
@@ -53,6 +56,8 @@ def get_status() -> dict:
     s["lastSyncAt"] = db.get_sync_state("last_sync_at")
     s["backfillDone"] = db.get_sync_state("backfill_done") == "1"
     s["retentionDays"] = RETENTION_DAYS
+    s["lastPurgeAt"] = db.get_sync_state("last_purge_at")
+    s["storage"] = db.database_stats()
     return s
 
 
@@ -206,8 +211,12 @@ def run_sync(full: bool = False):
             while _enrich_failures(api) >= ENRICH_BATCH:
                 pass  # keep going while full batches come back
 
+            _set(phase="purge", message="applying retention")
+            purged = purge_expired()
+
             db.set_sync_state("last_sync_at", datetime.now(timezone.utc).isoformat())
-            _set(phase="idle", message=f"done in {time.time() - started:.0f}s")
+            suffix = f", purged {purged}" if purged else ""
+            _set(phase="idle", message=f"done in {time.time() - started:.0f}s{suffix}")
         except Exception as e:
             log.exception("sync failed")
             _set(phase="error", error=str(e), message=str(e))
@@ -222,6 +231,11 @@ def window_since(window: str) -> str:
     """Translate a dashboard window key into an AAC-format cutoff timestamp."""
     minutes = {"1h": 60, "6h": 360, "24h": 1440, "7d": 10080, "14d": 20160}.get(window, 1440)
     return _iso(datetime.now(timezone.utc) - timedelta(minutes=minutes))
+
+
+def window_since_days(days: int) -> str:
+    """Cutoff timestamp for a number of days back, in AAC's format."""
+    return _iso(datetime.now(timezone.utc) - timedelta(days=days))
 
 
 def bucket_minutes(window: str) -> int:
@@ -255,3 +269,71 @@ def backfill_signatures(batch: int = 5000) -> int:
     if total:
         log.info(f"Backfilled {total} error signatures")
     return total
+
+
+def purge_expired() -> int:
+    """
+    Drop jobs older than the retention window.
+
+    Without this the store grows forever: the dashboard cannot look back past
+    the retention window, so older rows are unreachable and only cost disk. The
+    file is only vacuumed after a substantial purge, since VACUUM rewrites the
+    whole database.
+    """
+    # Purge a day beyond the retention window: deleting exactly at the boundary
+    # would eat into the oldest bucket of the 14-day chart as the window slides.
+    cutoff = _iso(datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS + PURGE_GRACE_DAYS))
+    deleted = db.purge_jobs_older_than(cutoff)
+
+    # Cached Databricks log zips expire on their own schedule — they are keyed
+    # by job and would otherwise outlive the jobs they belong to.
+    try:
+        import app  # imported late: app imports this module
+        dbx_logs.purge_old_bundles(app.DBX_BUNDLE_DIR)
+    except Exception as e:
+        log.info(f"bundle cleanup skipped: {e}")
+
+    if deleted:
+        db.set_sync_state("last_purge_at", datetime.now(timezone.utc).isoformat())
+        db.set_sync_state("last_purge_count", deleted)
+        if deleted >= PURGE_VACUUM_THRESHOLD:
+            _set(message=f"reclaiming space after purging {deleted} jobs")
+            db.vacuum()
+    return deleted
+
+
+def reclassify(only_unclassified: bool = True, batch: int = 5000) -> dict:
+    """
+    Re-run the rules over failures we already hold.
+
+    Classification is derived from error text stored at enrichment time, so
+    editing error_rules.json can be applied to history without touching AAC.
+    """
+    classifier.load_rules(force=True)
+    changed = scanned = 0
+    seen: set[int] = set()
+    while True:
+        rows = db.rows_for_reclassify(only_unclassified=only_unclassified, limit=batch)
+        rows = [r for r in rows if r["job_id"] not in seen]
+        if not rows:
+            break
+        for row in rows:
+            seen.add(row["job_id"])
+            scanned += 1
+            parsed = {
+                "exceptionType": row.get("error_type"),
+                "exceptionLabel": row.get("error_label"),
+                "why": row.get("error_why"),
+                "message": row.get("error_detail"),
+                "rawMessage": row.get("error_detail") or "",
+            }
+            result = classifier.classify(parsed)
+            if result["ruleId"] != "unclassified":
+                db.update_classification(row["job_id"], result["ruleId"],
+                                         result["title"], result["category"])
+                changed += 1
+        _set(message=f"reclassified {changed} of {scanned}")
+        if len(rows) < batch:
+            break
+    log.info(f"Reclassify: {changed} of {scanned} rows updated")
+    return {"scanned": scanned, "changed": changed}

@@ -1029,3 +1029,77 @@ def get_job(job_id: int, source: str = "aacp") -> Optional[dict]:
         row = conn.execute("SELECT * FROM jobs WHERE job_id = ? AND source = ?",
                            (int(job_id), source)).fetchone()
     return dict(row) if row else None
+
+
+def rows_for_reclassify(only_unclassified: bool = True, limit: int = 5000,
+                        source: str = "aacp") -> list[dict]:
+    """
+    Enriched failures whose stored error text can be re-run through the rules.
+
+    Used after editing error_rules.json: the classification is derived from text
+    we already hold, so re-applying it costs nothing on the AAC side.
+    """
+    where = ["source = ?", "status = 'Failed'", "enriched_at IS NOT NULL"]
+    params: list[Any] = [source]
+    if only_unclassified:
+        where.append("(error_rule IS NULL OR error_rule IN ('unclassified', 'no_failed_stage'))")
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT job_id, error_type, error_label, error_why, error_detail
+            FROM jobs WHERE {' AND '.join(where)} LIMIT ?
+        """, params + [limit]).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_classification(job_id: int, rule_id: str, title: str, category: str):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE jobs SET error_rule = ?, error_title = ?, error_category = ? WHERE job_id = ?",
+            (rule_id, title, category, int(job_id)))
+
+
+# ---------------------------------------------------------------------------
+# Retention
+# ---------------------------------------------------------------------------
+
+def count_jobs_older_than(cutoff: str, source: str = "aacp") -> int:
+    with get_db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE source = ? AND created_at < ?",
+                           (source, cutoff)).fetchone()
+    return row["n"] if row else 0
+
+
+def purge_jobs_older_than(cutoff: str, source: str = "aacp") -> int:
+    """
+    Delete job rows created before the cutoff.
+
+    The dashboard only looks back as far as the retention window, so older rows
+    are unreachable from the UI and only cost disk. Returns the number deleted.
+    """
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM jobs WHERE source = ? AND created_at < ?",
+                           (source, cutoff))
+        deleted = cur.rowcount or 0
+    if deleted:
+        log.info(f"Purged {deleted} jobs created before {cutoff}")
+    return deleted
+
+
+def vacuum():
+    """Reclaim file space after a large delete (SQLite does not shrink on its own)."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=60)
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+
+
+def database_stats() -> dict:
+    """Row counts and on-disk size, for the retention display in the UI."""
+    size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS jobs, MIN(created_at) AS oldest, MAX(created_at) AS newest FROM jobs"
+        ).fetchone()
+    return {"jobs": row["jobs"] or 0, "oldest": row["oldest"], "newest": row["newest"],
+            "dbBytes": size}
